@@ -534,7 +534,7 @@ fun MainScreen(
                     Modifier.fillMaxWidth().safeDrawingPadding().padding(horizontal = 32.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    FilledTonalButton(onClick = { tab = Tab.OVERVIEW }, modifier = Modifier.heightIn(min = 48.dp).dpadFocus()) {
+                    FilledTonalButton(shape = ButtonDefaults.shape, onClick = { tab = Tab.OVERVIEW }, modifier = Modifier.heightIn(min = 48.dp).dpadFocus(ButtonDefaults.shape)) {
                         Icon(Icons.Default.Home, null, Modifier.size(22.dp))
                         Spacer(Modifier.width(10.dp))
                         Text("返回投屏首页", style = MaterialTheme.typography.titleMedium)
@@ -728,13 +728,13 @@ private fun OverviewContent(
                 }
                 if (state == ServerState.RUNNING && mirroringActive) {
                     Row(modifier = Modifier.align(Alignment.TopEnd).padding(4.dp)) {
-                        IconButton(onClick = onPip, modifier = Modifier.dpadFocus()) {
+                        IconButton(onClick = onPip, modifier = Modifier.dpadFocus(CircleShape)) {
                             Icon(
                                 painterResource(R.drawable.ic_pip), contentDescription = stringResource(R.string.cd_pip),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                             )
                         }
-                        IconButton(onClick = onFullscreen, modifier = Modifier.dpadFocus()) {
+                        IconButton(onClick = onFullscreen, modifier = Modifier.dpadFocus(CircleShape)) {
                             Icon(
                                 Icons.Default.Fullscreen, contentDescription = stringResource(R.string.cd_fullscreen),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
@@ -817,8 +817,9 @@ private fun OverviewContent(
                         else -> Triple(Icons.Default.PlayArrow, R.string.btn_start, viewModel::startServer)
                     }
                     FilledTonalButton(
+                        shape = ButtonDefaults.shape,
                         onClick = action,
-                        modifier = Modifier.dpadFocus().focusRequester(startFocus)
+                        modifier = Modifier.dpadFocus(ButtonDefaults.shape).focusRequester(startFocus)
                     ) {
                         Icon(
                             imageVector = icon,
@@ -866,13 +867,13 @@ private fun FullscreenVideo(
             modifier = Modifier.align(Alignment.TopEnd)
         ) {
             Row(modifier = Modifier.padding(8.dp)) {
-                IconButton(onClick = onPip, modifier = Modifier.dpadFocus()) {
+                IconButton(onClick = onPip, modifier = Modifier.dpadFocus(CircleShape)) {
                     Icon(
                         painterResource(R.drawable.ic_pip), contentDescription = stringResource(R.string.cd_pip),
                         tint = Color.White.copy(alpha = 0.7f)
                     )
                 }
-                IconButton(onClick = onExitFullscreen, modifier = Modifier.dpadFocus()) {
+                IconButton(onClick = onExitFullscreen, modifier = Modifier.dpadFocus(CircleShape)) {
                     Icon(
                         Icons.Default.FullscreenExit, contentDescription = stringResource(R.string.cd_exit_fullscreen),
                         tint = Color.White.copy(alpha = 0.7f)
@@ -1038,13 +1039,13 @@ private fun NowPlayingContent(viewModel: MainViewModel) {
                     onBegin = { viewModel.audioScanBegin(false) },
                     onEnd = { viewModel.audioScanEnd() }
                 )
-                PreviousButton(player, modifier = Modifier.dpadFocus())
+                PreviousButton(player, modifier = Modifier.dpadFocus(CircleShape))
                 PlayPauseButton(
                     player,
                     modifier = Modifier.size(63.dp).dpadFocus(CircleShape),
                     iconSize = 40.dp
                 )
-                NextButton(player, modifier = Modifier.dpadFocus())
+                NextButton(player, modifier = Modifier.dpadFocus(CircleShape))
                 HoldScanButton(
                     icon = Icons.Default.FastForward,
                     contentDescription = stringResource(R.string.cd_fast_forward),
@@ -1110,7 +1111,7 @@ private fun VolumeSlider(
                 onValueChangeFinished = onValueChangeFinished,
                 modifier = Modifier
                     .semantics { contentDescription = label }
-                    .dpadFocus()
+                    .dpadFocus(RoundedCornerShape(12.dp))
                     .dpadAdjust(onLeft = { onStep(-1) }, onRight = { onStep(1) })
             )
         }

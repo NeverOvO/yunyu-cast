@@ -149,6 +149,7 @@ fun AppUpdateDialog(
                     ) {
                         if (primaryLabel != null) {
                             Button(
+                                shape = ButtonDefaults.shape,
                                 onClick = {
                                     when (phase) {
                                         UpdatePhase.IDLE -> onCheck()
@@ -158,7 +159,7 @@ fun AppUpdateDialog(
                                         else -> onDismiss()
                                     }
                                 },
-                                modifier = Modifier.heightIn(min = 56.dp).focusRequester(primaryFocus).dpadFocus(),
+                                modifier = Modifier.heightIn(min = 56.dp).focusRequester(primaryFocus).dpadFocus(ButtonDefaults.shape),
                                 contentPadding = PaddingValues(horizontal = 28.dp, vertical = 14.dp),
                             ) {
                                 Text(primaryLabel, fontSize = 20.sp)
@@ -166,15 +167,17 @@ fun AppUpdateDialog(
                         }
                         when (phase) {
                             UpdatePhase.DOWNLOADING -> TextButton(
+                                shape = ButtonDefaults.shape,
                                 onClick = onCancelDownload,
-                                modifier = Modifier.heightIn(min = 56.dp).dpadFocus(),
+                                modifier = Modifier.heightIn(min = 56.dp).dpadFocus(ButtonDefaults.shape),
                                 contentPadding = PaddingValues(horizontal = 22.dp, vertical = 14.dp),
                             ) { Text("取消下载", color = Color.White, fontSize = 20.sp) }
                             UpdatePhase.UP_TO_DATE -> Unit
                             else -> OutlinedButton(
+                                shape = ButtonDefaults.shape,
                                 onClick = onDismiss,
                                 modifier = Modifier.heightIn(min = 56.dp)
-                                    .then(if (primaryLabel == null) Modifier.focusRequester(closeFocus) else Modifier).dpadFocus(),
+                                    .then(if (primaryLabel == null) Modifier.focusRequester(closeFocus) else Modifier).dpadFocus(ButtonDefaults.shape),
                                 contentPadding = PaddingValues(horizontal = 24.dp, vertical = 14.dp),
                             ) {
                                 Text(if (phase == UpdatePhase.VERIFYING) "稍后安装" else "以后再说",

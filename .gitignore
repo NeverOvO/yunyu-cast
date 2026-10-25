@@ -26,3 +26,4 @@
 *.aab
 *.idsig
 *.log
+.kotlin/

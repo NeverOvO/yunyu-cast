@@ -8,6 +8,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Share
@@ -44,10 +45,10 @@ fun LogsScreen(viewModel: MainViewModel) {
             TopAppBar(
                 title = { Text(stringResource(R.string.tab_logs)) },
                 actions = {
-                    IconButton(onClick = viewModel::exportLogs, modifier = Modifier.dpadFocus()) {
+                    IconButton(onClick = viewModel::exportLogs, modifier = Modifier.dpadFocus(CircleShape)) {
                         Icon(Icons.Outlined.Share, stringResource(R.string.btn_export))
                     }
-                    IconButton(onClick = viewModel::clearLogs, modifier = Modifier.dpadFocus()) {
+                    IconButton(onClick = viewModel::clearLogs, modifier = Modifier.dpadFocus(CircleShape)) {
                         Icon(Icons.Outlined.Delete, stringResource(R.string.btn_clear))
                     }
                 },

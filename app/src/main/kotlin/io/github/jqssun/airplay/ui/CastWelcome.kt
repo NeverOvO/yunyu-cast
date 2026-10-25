@@ -121,31 +121,31 @@ fun CastWelcome(
             }
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Button(onClick = onOpenSettings,
+                    Button(shape = ButtonDefaults.shape, onClick = onOpenSettings,
                         modifier = Modifier.heightIn(min = 56.dp)
-                            .then(if (ready) Modifier.focusRequester(actionFocus) else Modifier).dpadFocus(),
+                            .then(if (ready) Modifier.focusRequester(actionFocus) else Modifier).dpadFocus(ButtonDefaults.shape),
                         contentPadding = PaddingValues(horizontal = 26.dp, vertical = 12.dp)) {
                         Icon(Icons.Default.Settings, null, Modifier.size(24.dp))
                         Spacer(Modifier.width(10.dp))
                         Text("画面设置", fontSize = 20.sp)
                     }
-                    OutlinedButton(onClick = { showHelp = true },
-                        modifier = Modifier.heightIn(min = 56.dp).dpadFocus(),
+                    OutlinedButton(shape = ButtonDefaults.shape, onClick = { showHelp = true },
+                        modifier = Modifier.heightIn(min = 56.dp).dpadFocus(ButtonDefaults.shape),
                         contentPadding = PaddingValues(horizontal = 26.dp, vertical = 12.dp)) {
                         Icon(Icons.Default.HelpOutline, null, Modifier.size(24.dp))
                         Spacer(Modifier.width(10.dp))
                         Text("连接帮助", fontSize = 20.sp)
                     }
-                    OutlinedButton(onClick = onOpenUpdates,
-                        modifier = Modifier.heightIn(min = 56.dp).dpadFocus(),
+                    OutlinedButton(shape = ButtonDefaults.shape, onClick = onOpenUpdates,
+                        modifier = Modifier.heightIn(min = 56.dp).dpadFocus(ButtonDefaults.shape),
                         contentPadding = PaddingValues(horizontal = 26.dp, vertical = 12.dp)) {
                         Icon(Icons.Default.SystemUpdateAlt, null, Modifier.size(24.dp))
                         Spacer(Modifier.width(10.dp))
                         Text(updateLabel, fontSize = 20.sp)
                     }
                     if (!ready) {
-                        FilledTonalButton(onClick = onAction, modifier = Modifier.heightIn(min = 56.dp)
-                            .focusRequester(actionFocus).dpadFocus()) {
+                        FilledTonalButton(shape = ButtonDefaults.shape, onClick = onAction, modifier = Modifier.heightIn(min = 56.dp)
+                            .focusRequester(actionFocus).dpadFocus(ButtonDefaults.shape)) {
                             Text(actionLabel, fontSize = 20.sp)
                         }
                     }
@@ -182,13 +182,13 @@ fun CastWelcome(
             },
             confirmButton = {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = onRefreshDiscovery, enabled = ready, modifier = Modifier.dpadFocus()) {
+                    TextButton(shape = ButtonDefaults.shape, onClick = onRefreshDiscovery, enabled = ready, modifier = Modifier.dpadFocus(ButtonDefaults.shape)) {
                         Text("重新查找", fontSize = 18.sp)
                     }
-                    TextButton(onClick = { showHelp = false; onOpenLogs() }, modifier = Modifier.dpadFocus()) {
+                    TextButton(shape = ButtonDefaults.shape, onClick = { showHelp = false; onOpenLogs() }, modifier = Modifier.dpadFocus(ButtonDefaults.shape)) {
                         Text("查看日志", fontSize = 18.sp)
                     }
-                    Button(onClick = { showHelp = false }, modifier = Modifier.focusRequester(closeFocus).dpadFocus()) {
+                    Button(shape = ButtonDefaults.shape, onClick = { showHelp = false }, modifier = Modifier.focusRequester(closeFocus).dpadFocus(ButtonDefaults.shape)) {
                         Text("知道了", fontSize = 18.sp)
                     }
                 }

@@ -25,7 +25,6 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.shape.RoundedCornerShape
 
 fun Context.isTvDevice(): Boolean =
     packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
@@ -38,7 +37,8 @@ fun isTv(): Boolean {
     return remember(ctx) { ctx.isTvDevice() }
 }
 
-fun Modifier.dpadFocus(shape: Shape = RoundedCornerShape(12.dp)): Modifier = composed {
+// Share the control's shape explicitly: buttons, chips and rows have different outlines.
+fun Modifier.dpadFocus(shape: Shape): Modifier = composed {
     var focused by remember { mutableStateOf(false) }
     onFocusChanged { focused = it.isFocused }
         .border(2.dp, if (focused) MaterialTheme.colorScheme.primary else Color.Transparent, shape)

@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
@@ -352,7 +353,7 @@ fun SettingsScreen(
                             onValueChangeFinished = { viewModel.set(Prefs.AUDIO_LATENCY_MS, sliderVal.roundToInt()) },
                             valueRange = 0f..1000f,
                             steps = 19,
-                            modifier = Modifier.dpadFocus().dpadAdjust(
+                            modifier = Modifier.dpadFocus(RoundedCornerShape(12.dp)).dpadAdjust(
                                 onLeft = { viewModel.set(Prefs.AUDIO_LATENCY_MS, (audioLatencyMs - 50).coerceIn(0, 1000)) },
                                 onRight = { viewModel.set(Prefs.AUDIO_LATENCY_MS, (audioLatencyMs + 50).coerceIn(0, 1000)) }
                             )
@@ -380,7 +381,7 @@ fun SettingsScreen(
                             onValueChangeFinished = { viewModel.set(Prefs.AUDIO_ADAPTIVE_STEP, stepVal.roundToInt()) },
                             valueRange = 0f..maxStep.toFloat(),
                             steps = maxStep - 1,
-                            modifier = Modifier.dpadFocus().dpadAdjust(
+                            modifier = Modifier.dpadFocus(RoundedCornerShape(12.dp)).dpadAdjust(
                                 onLeft = { viewModel.set(Prefs.AUDIO_ADAPTIVE_STEP, (audioAdaptiveStep - 1).coerceIn(0, maxStep)) },
                                 onRight = { viewModel.set(Prefs.AUDIO_ADAPTIVE_STEP, (audioAdaptiveStep + 1).coerceIn(0, maxStep)) }
                             )
@@ -483,6 +484,7 @@ private fun SettingResolution(
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     @Composable
                     fun presetChip(key: String, label: String) = FilterChip(
+                        shape = FilterChipDefaults.shape,
                         selected = value == key && !editing,
                         onClick = {
                             editing = false
@@ -490,14 +492,15 @@ private fun SettingResolution(
                             onValueChange(key)
                         },
                         label = { Text(label) },
-                        modifier = Modifier.dpadFocus()
+                        modifier = Modifier.dpadFocus(FilterChipDefaults.shape)
                     )
                     presets.forEach { (key, label) -> presetChip(key, label) }
                     FilterChip(
+                        shape = FilterChipDefaults.shape,
                         selected = !isPreset || editing,
                         onClick = { editing = true },
                         label = { Text(stringResource(R.string.chip_custom)) },
-                        modifier = Modifier.dpadFocus()
+                        modifier = Modifier.dpadFocus(FilterChipDefaults.shape)
                     )
                     devicePresets.forEach { (key, label) -> presetChip(key, label) }
                 }
@@ -602,10 +605,11 @@ private fun SettingChipField(
                 Spacer(Modifier.height(8.dp))
                 ChipRow(if (editing) "" else value, presets, { editing = false; text = ""; onValueChange(it) }) {
                     FilterChip(
+                        shape = FilterChipDefaults.shape,
                         selected = !isPreset || editing,
                         onClick = { editing = true },
                         label = { Text(stringResource(R.string.chip_custom)) },
-                        modifier = Modifier.dpadFocus()
+                        modifier = Modifier.dpadFocus(FilterChipDefaults.shape)
                     )
                 }
                 if (editing || !isPreset) {
@@ -644,10 +648,11 @@ private fun ChipRow(
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         options.forEach { (key, label) ->
             FilterChip(
+                        shape = FilterChipDefaults.shape,
                 selected = value == key,
                 onClick = { onSelect(key) },
                 label = { Text(label) },
-                modifier = Modifier.dpadFocus()
+                modifier = Modifier.dpadFocus(FilterChipDefaults.shape)
             )
         }
         trailing()
