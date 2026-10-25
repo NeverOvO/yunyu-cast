@@ -35,6 +35,10 @@ UxPlay 的持久修改保存在 `app/src/main/cpp/patches/UxPlay/`。Gradle 配�
 
 更新依赖时保留来源、版权和许可信息，说明版本变化及影响。不要将生成目录、APK、日志、`local.properties`、证书或密码加入源码提交；安装包通过 GitHub Release 分发。
 
+## 发布更新
+
+应用内更新依赖明确的版本号、发布标签、英文 APK 文件名和原签名。发布新版时遵循 [更新发布约定](docs/UPDATES.md)，先上传完整附件，再公开 Release。
+
 ## 许可
 
 本项目应用代码按 [GNU GPL v3](LICENSE) 发布。提交代码时保留已有版权声明，确保新增内容具有可随项目分发的许可。第三方代码和素材需要注明来源及其许可。

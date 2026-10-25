@@ -13,11 +13,14 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.SystemUpdateAlt
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -25,6 +28,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -37,7 +41,11 @@ import androidx.compose.ui.res.stringResource
 import kotlin.math.roundToInt
 
 @Composable
-fun SettingsScreen(viewModel: MainViewModel) {
+fun SettingsScreen(
+    viewModel: MainViewModel,
+    updateLabel: String = "检查更新",
+    onOpenUpdates: () -> Unit = {}
+) {
     val serverName by viewModel.pref(Prefs.SERVER_NAME).collectAsState()
     val h265 by viewModel.pref(Prefs.H265).collectAsState()
     val enforceSdr by viewModel.pref(Prefs.ENFORCE_SDR).collectAsState()
@@ -84,6 +92,17 @@ fun SettingsScreen(viewModel: MainViewModel) {
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
+        ListItem(
+            modifier = Modifier
+                .dpadFocus(RectangleShape)
+                .clickable(onClick = onOpenUpdates)
+                .heightIn(min = 88.dp),
+            leadingContent = { Icon(Icons.Default.SystemUpdateAlt, null, Modifier.size(28.dp)) },
+            headlineContent = { Text("软件更新", fontSize = 22.sp, color = Color.White) },
+            supportingContent = { Text("在电视上下载并安装新版，不用再找 U 盘。", fontSize = 18.sp) },
+            trailingContent = { Text(updateLabel, fontSize = 20.sp, color = MaterialTheme.colorScheme.primary) }
+        )
+        Spacer(Modifier.height(12.dp))
         SectionHeader(stringResource(R.string.section_display))
 
         SettingResolution(

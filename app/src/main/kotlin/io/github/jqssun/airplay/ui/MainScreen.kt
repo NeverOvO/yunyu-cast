@@ -95,7 +95,9 @@ fun MainScreen(
     onSurfaceDestroyed: (android.view.Surface) -> Unit,
     onPip: () -> Unit = {},
     onLocalNetwork: () -> Unit = {},
-    onExit: () -> Unit = {}
+    onExit: () -> Unit = {},
+    updateLabel: String = "检查更新",
+    onOpenUpdates: () -> Unit = {}
 ) {
     BackHandler(enabled = !isInPip) { onExit() }
     var tab by remember { mutableStateOf(Tab.OVERVIEW) }
@@ -547,7 +549,8 @@ fun MainScreen(
                     tab, viewModel, video,
                     onFullscreen = { fullscreen = true }, onPip = onPip, onLocalNetwork = onLocalNetwork,
                     showAudioMode = audioOnly, onOpenSettings = { tab = Tab.SETTINGS },
-                    onOpenLogs = { tab = Tab.LOGS }
+                    onOpenLogs = { tab = Tab.LOGS },
+                    updateLabel = updateLabel, onOpenUpdates = onOpenUpdates
                 )
             }
             AudioMiniController(
@@ -589,16 +592,19 @@ private fun TabContent(
     onLocalNetwork: () -> Unit,
     showAudioMode: Boolean,
     onOpenSettings: () -> Unit,
-    onOpenLogs: () -> Unit
+    onOpenLogs: () -> Unit,
+    updateLabel: String,
+    onOpenUpdates: () -> Unit
 ) {
     when (tab) {
         Tab.OVERVIEW -> OverviewContent(
             viewModel, video,
             onFullscreen = onFullscreen, onPip = onPip, onLocalNetwork = onLocalNetwork, showAudioMode = showAudioMode,
-            onOpenSettings = onOpenSettings, onOpenLogs = onOpenLogs
+            onOpenSettings = onOpenSettings, onOpenLogs = onOpenLogs,
+            updateLabel = updateLabel, onOpenUpdates = onOpenUpdates
         )
         Tab.LOGS -> LogsScreen(viewModel)
-        Tab.SETTINGS -> SettingsScreen(viewModel)
+        Tab.SETTINGS -> SettingsScreen(viewModel, updateLabel, onOpenUpdates)
     }
 }
 
@@ -611,7 +617,9 @@ private fun OverviewContent(
     onLocalNetwork: () -> Unit,
     showAudioMode: Boolean = false,
     onOpenSettings: () -> Unit,
-    onOpenLogs: () -> Unit
+    onOpenLogs: () -> Unit,
+    updateLabel: String,
+    onOpenUpdates: () -> Unit
 ) {
     val state by viewModel.serverState.collectAsState()
     val localNetwork by viewModel.localNetwork.collectAsState()
@@ -664,7 +672,9 @@ private fun OverviewContent(
             },
             onOpenSettings = onOpenSettings,
             onOpenLogs = onOpenLogs,
-            actionFocus = startFocus
+            actionFocus = startFocus,
+            updateLabel = updateLabel,
+            onOpenUpdates = onOpenUpdates
         )
         return
     }

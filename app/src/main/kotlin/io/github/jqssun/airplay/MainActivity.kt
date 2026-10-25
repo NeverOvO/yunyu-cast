@@ -2,6 +2,8 @@ package io.github.jqssun.airplay
 
 import android.Manifest
 import android.app.PictureInPictureParams
+import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.ComponentName
 import android.content.Intent
 import android.content.ServiceConnection
@@ -10,6 +12,8 @@ import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.net.Uri
+import android.provider.Settings
 import android.util.Rational
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -18,12 +22,17 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import io.github.jqssun.airplay.service.AirPlayService
 import io.github.jqssun.airplay.ui.MainScreen
+import io.github.jqssun.airplay.ui.AppUpdateDialog
+import io.github.jqssun.airplay.update.AppUpdateViewModel
 import io.github.jqssun.airplay.ui.isTvDevice
 import io.github.jqssun.airplay.ui.theme.AirPlayTheme
 import io.github.jqssun.airplay.viewmodel.LocalNetworkAccess
@@ -31,12 +40,25 @@ import io.github.jqssun.airplay.viewmodel.MainViewModel
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
+    private val updateViewModel: AppUpdateViewModel by viewModels()
+    private var installScreenOpen = false
+    private var installPermissionScreenOpen = false
+    private val installPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        installPermissionScreenOpen = false
+        updateViewModel.permissionReturned(packageManager.canRequestPackageInstalls())
+    }
+    private val installUpdate = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        installScreenOpen = false
+        updateViewModel.installMessage("如果还没有完成安装，可再点“安装更新”。当前版本仍可正常投屏。")
+    }
     private var service: AirPlayService? = null
     val isInPip = mutableStateOf(false)
     private val logCallback: (String) -> Unit = { viewModel.addLog(it) }
@@ -113,8 +135,33 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                combine(viewModel.connectionCount, viewModel.videoPlaybackActive, viewModel.mirroringActive) {
+                    connections, video, mirror -> connections == 0 && !video && !mirror
+                }.distinctUntilChanged().collectLatest { idle ->
+                    if (idle) {
+                        delay(2_500)
+                        updateViewModel.checkIfDue()
+                    }
+                }
+            }
+        }
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                updateViewModel.state.collect {
+                    if (updateViewModel.shouldAutoInstall()) requestUpdateInstall()
+                }
+            }
+        }
+
         setContent {
             AirPlayTheme {
+                val updateState by updateViewModel.state.collectAsState()
+                val updateConnections by viewModel.connectionCount.collectAsState()
+                val updateVideoActive by viewModel.videoPlaybackActive.collectAsState()
+                val updateMirrorActive by viewModel.mirroringActive.collectAsState()
+                val casting = updateConnections > 0 || updateVideoActive || updateMirrorActive
                 MainScreen(
                     viewModel = viewModel,
                     isInPip = isInPip.value,
@@ -122,9 +169,65 @@ class MainActivity : ComponentActivity() {
                     onSurfaceDestroyed = { viewModel.onSurfaceDestroyed(it) },
                     onPip = { enterPip() },
                     onLocalNetwork = ::_requestLocalNetwork,
-                    onExit = ::exitToTv
+                    onExit = ::exitToTv,
+                    updateLabel = updateState.entryLabel,
+                    onOpenUpdates = updateViewModel::open
+                )
+                AppUpdateDialog(
+                    state = updateState.copy(dialogVisible = updateState.dialogVisible && !casting),
+                    onDismiss = updateViewModel::dismiss,
+                    onCheck = updateViewModel::check,
+                    onDownload = updateViewModel::download,
+                    onInstall = ::requestUpdateInstall,
+                    onCancelDownload = updateViewModel::cancelDownload
                 )
             }
+        }
+    }
+
+    private fun requestUpdateInstall() {
+        if (installScreenOpen || installPermissionScreenOpen) return
+        updateViewModel.stopAutoInstall()
+        if (viewModel.connectionCount.value > 0 || viewModel.videoPlaybackActive.value || viewModel.mirroringActive.value) {
+            updateViewModel.installMessage("正在投屏，请先在手机上结束投屏，再点“安装更新”。")
+            return
+        }
+        val file = updateViewModel.fileForInstall() ?: run {
+            updateViewModel.missingPreparedFile()
+            return
+        }
+        if (!packageManager.canRequestPackageInstalls()) {
+            updateViewModel.requireInstallPermission()
+            try {
+                installPermissionScreenOpen = true
+                installPermission.launch(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:$packageName")))
+            } catch (_: ActivityNotFoundException) {
+                installPermissionScreenOpen = false
+                updateViewModel.requireInstallPermission("请在电视系统设置中允许“云屿投屏”安装应用，然后返回这里继续安装。")
+            } catch (_: SecurityException) {
+                installPermissionScreenOpen = false
+                updateViewModel.requireInstallPermission("电视系统暂不允许安装，请先在系统设置中开启安装权限。")
+            }
+            return
+        }
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, AppUpdateViewModel.APK_MIME)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                clipData = ClipData.newRawUri("云屿投屏更新", uri)
+                putExtra(Intent.EXTRA_RETURN_RESULT, true)
+            }
+            installScreenOpen = true
+            updateViewModel.installerOpened()
+            installUpdate.launch(intent)
+        } catch (_: ActivityNotFoundException) {
+            installScreenOpen = false
+            updateViewModel.installMessage("这台电视未提供可用的安装页面，请通过电视文件管理器安装新版。")
+        } catch (_: Exception) {
+            installScreenOpen = false
+            updateViewModel.installMessage("暂时无法打开安装页面，请稍后再点“安装更新”。")
         }
     }
 

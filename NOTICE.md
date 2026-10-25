@@ -7,3 +7,5 @@
 第三方组件继续适用各自的版权和许可，见 THIRD_PARTY_NOTICES.md 与 LICENSES/；未通过本声明改变上游许可。手绘图标和横幅由 imagegen 生成，原图及提示词随仓库提供。
 
 本项目与 Apple、Sony 无隶属关系，不是其官方或认证产品。AirPlay 等名称仅用于描述兼容功能。
+
+0.5.0-preview.1 增加 GitHub Release 更新查询、系统后台下载、安装前包检查、系统安装权限引导和电视遥控更新界面。

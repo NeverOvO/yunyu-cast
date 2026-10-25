@@ -8,6 +8,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SystemUpdateAlt
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -41,7 +42,9 @@ fun CastWelcome(
     onOpenSettings: () -> Unit,
     onOpenLogs: () -> Unit,
     onRefreshDiscovery: () -> Unit,
-    actionFocus: FocusRequester
+    actionFocus: FocusRequester,
+    updateLabel: String = "检查更新",
+    onOpenUpdates: () -> Unit = {}
 ) {
     var showHelp by remember { mutableStateOf(false) }
     val quality = when (resolution) {
@@ -57,7 +60,8 @@ fun CastWelcome(
         val wide = maxWidth >= 600.dp && maxWidth > maxHeight
         // A short viewport or larger system text must scroll instead of squeezing the
         // weighted header to zero height and drawing it outside the TV safe area.
-        val fixedHeight = wide && maxHeight >= 480.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
+        val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+        val fixedHeight = wide && maxWidth >= 760.dp * fontScale && maxHeight >= 480.dp * fontScale
         val compact = maxHeight < 480.dp || maxWidth < 800.dp
         val edgeX = if (wide) if (compact) 36.dp else 48.dp else 24.dp
         val edgeY = if (compact) 24.dp else 32.dp
@@ -131,6 +135,13 @@ fun CastWelcome(
                         Icon(Icons.Default.HelpOutline, null, Modifier.size(24.dp))
                         Spacer(Modifier.width(10.dp))
                         Text("连接帮助", fontSize = 20.sp)
+                    }
+                    OutlinedButton(onClick = onOpenUpdates,
+                        modifier = Modifier.heightIn(min = 56.dp).dpadFocus(),
+                        contentPadding = PaddingValues(horizontal = 26.dp, vertical = 12.dp)) {
+                        Icon(Icons.Default.SystemUpdateAlt, null, Modifier.size(24.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Text(updateLabel, fontSize = 20.sp)
                     }
                     if (!ready) {
                         FilledTonalButton(onClick = onAction, modifier = Modifier.heightIn(min = 56.dp)
