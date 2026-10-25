@@ -7,6 +7,7 @@
 #include <string.h>
 #include <time.h>
 #include <errno.h>
+#include <pthread.h>
 #include <android/log.h>
 #include "android_raop_callbacks.h"
 #include "audio_engine.h"
@@ -15,11 +16,35 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
+/* Only threads attached by this bridge get a detach destructor. Java-owned threads
+ * must stay attached. The VM outlives each receiver context and its RTP workers.
+ * https://developer.android.com/ndk/guides/jni-tips#threads */
+static pthread_key_t attached_vm_key;
+static pthread_once_t attached_vm_once = PTHREAD_ONCE_INIT;
+static int attached_vm_key_error = -1;
+
+static void _detach_thread(void *value) {
+    JavaVM *vm = (JavaVM *)value;
+    if (vm) (*vm)->DetachCurrentThread(vm);
+}
+
+static void _create_attached_vm_key(void) {
+    attached_vm_key_error = pthread_key_create(&attached_vm_key, _detach_thread);
+}
+
 static JNIEnv *_get_env(android_callback_ctx_t *ctx) {
     JNIEnv *env = NULL;
     int status = (*ctx->jvm)->GetEnv(ctx->jvm, (void **)&env, JNI_VERSION_1_6);
     if (status == JNI_EDETACHED) {
-        (*ctx->jvm)->AttachCurrentThread(ctx->jvm, &env, NULL);
+        pthread_once(&attached_vm_once, _create_attached_vm_key);
+        if (attached_vm_key_error ||
+            (*ctx->jvm)->AttachCurrentThread(ctx->jvm, &env, NULL) != JNI_OK) return NULL;
+        if (pthread_setspecific(attached_vm_key, ctx->jvm) != 0) {
+            (*ctx->jvm)->DetachCurrentThread(ctx->jvm);
+            return NULL;
+        }
+    } else if (status != JNI_OK) {
+        return NULL;
     }
     /* Clear any pending exception from a previous callback on this thread,
        otherwise JNI calls like NewByteArray will fatally abort. */
@@ -42,6 +67,7 @@ void android_callbacks_init(android_callback_ctx_t *ctx, JNIEnv *env, jobject ca
     pthread_mutex_init(&ctx->playback_info_lock, NULL);
     pthread_cond_init(&ctx->play_ready_cond, NULL);
     ctx->play_ready = 0;
+    ctx->stopping = 0;
     ctx->playback_position = 0.0;
     /* -1.0 is the video finished sentinel, reserved for _video_stop */
     ctx->playback_duration = 0.0;
@@ -86,6 +112,14 @@ void android_callbacks_destroy(android_callback_ctx_t *ctx, JNIEnv *env) {
     pthread_mutex_destroy(&ctx->playback_info_lock);
 }
 
+void android_callbacks_interrupt_playback_wait(android_callback_ctx_t *ctx, int stopping) {
+    pthread_mutex_lock(&ctx->playback_info_lock);
+    if (stopping) ctx->stopping = 1;
+    ctx->play_ready = 1;
+    pthread_cond_broadcast(&ctx->play_ready_cond);
+    pthread_mutex_unlock(&ctx->playback_info_lock);
+}
+
 void android_callbacks_update_playback_info(android_callback_ctx_t *ctx, double position,
                                              double duration, float rate, int ready) {
     pthread_mutex_lock(&ctx->playback_info_lock);
@@ -120,6 +154,7 @@ static void _video_process(void *cls, raop_ntp_t *ntp, video_decode_struct *data
     }
 
     jbyteArray arr = (*env)->NewByteArray(env, data->data_len);
+    if (!arr) return;
     (*env)->SetByteArrayRegion(env, arr, 0, data->data_len, (jbyte *)data->data);
     (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_video_data,
                            arr, (jlong)data->ntp_time_local, (jboolean)data->is_h265);
@@ -189,6 +224,7 @@ static void _display_pin(void *cls, char *pin) {
     JNIEnv *env = _get_env(ctx);
     if (!env) return;
     jstring jpin = (*env)->NewStringUTF(env, pin);
+    if (!jpin) return;
     (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_display_pin, jpin);
     (*env)->DeleteLocalRef(env, jpin);
 }
@@ -239,6 +275,7 @@ static void _audio_set_metadata(void *cls, const void *buf, int len) {
     JNIEnv *env = _get_env(ctx);
     if (!env || !buf || len <= 0) return;
     jbyteArray arr = (*env)->NewByteArray(env, len);
+    if (!arr) return;
     (*env)->SetByteArrayRegion(env, arr, 0, len, (jbyte *)buf);
     (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_metadata, arr);
     (*env)->DeleteLocalRef(env, arr);
@@ -249,6 +286,7 @@ static void _audio_set_coverart(void *cls, const void *buf, int len) {
     JNIEnv *env = _get_env(ctx);
     if (!env || !buf || len <= 0) return;
     jbyteArray arr = (*env)->NewByteArray(env, len);
+    if (!arr) return;
     (*env)->SetByteArrayRegion(env, arr, 0, len, (jbyte *)buf);
     (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_coverart, arr);
     (*env)->DeleteLocalRef(env, arr);
@@ -259,7 +297,12 @@ static void _audio_remote_control_id(void *cls, const char *dacp_id, const char 
     JNIEnv *env = _get_env(ctx);
     if (!env) return;
     jstring jdacp = (*env)->NewStringUTF(env, dacp_id ? dacp_id : "");
+    if (!jdacp) return;
     jstring jremote = (*env)->NewStringUTF(env, active_remote ? active_remote : "");
+    if (!jremote) {
+        (*env)->DeleteLocalRef(env, jdacp);
+        return;
+    }
     (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_dacp_id, jdacp, jremote);
     (*env)->DeleteLocalRef(env, jdacp);
     (*env)->DeleteLocalRef(env, jremote);
@@ -305,12 +348,17 @@ static void _video_play(void *cls, const char *location, const float start_posit
     android_callback_ctx_t *ctx = (android_callback_ctx_t *)cls;
     LOGI("video_play: %s @ %.2fs", location ? location : "(null)", start_position);
     pthread_mutex_lock(&ctx->playback_info_lock);
+    if (ctx->stopping) {
+        pthread_mutex_unlock(&ctx->playback_info_lock);
+        return;
+    }
     ctx->play_ready = 0;
     pthread_mutex_unlock(&ctx->playback_info_lock);
     android_callbacks_update_playback_info(ctx, start_position, 0.0, 0.0f, 0);
     JNIEnv *env = _get_env(ctx);
     if (!env || !location) return;
     jstring jloc = (*env)->NewStringUTF(env, location);
+    if (!jloc) return;
     (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_video_play, jloc, (jfloat)start_position);
     (*env)->DeleteLocalRef(env, jloc);
 }
@@ -323,7 +371,7 @@ static void _video_wait_ready(void *cls) {
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_sec += 10; // hold for max 10s
     pthread_mutex_lock(&ctx->playback_info_lock);
-    while (!ctx->play_ready) {
+    while (!ctx->play_ready && !ctx->stopping) {
         if (pthread_cond_timedwait(&ctx->play_ready_cond, &ctx->playback_info_lock, &ts) == ETIMEDOUT) break;
     }
     pthread_mutex_unlock(&ctx->playback_info_lock);

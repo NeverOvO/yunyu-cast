@@ -35,8 +35,8 @@ class SettingsReceiver : BroadcastReceiver() {
         setResult(if (ok) Activity.RESULT_OK else Activity.RESULT_CANCELED, data, null)
 
     private companion object {
-        const val ACTION_SET = "io.github.jqssun.airplay.SET_SETTING"
-        const val ACTION_LIST = "io.github.jqssun.airplay.LIST_SETTINGS"
+        const val ACTION_SET = "com.yunyulai.tvcast.SET_SETTING"
+        const val ACTION_LIST = "com.yunyulai.tvcast.LIST_SETTINGS"
         const val EXTRA_KEY = "key"
         const val EXTRA_VALUE = "value"
     }

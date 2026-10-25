@@ -18,6 +18,7 @@ object NativeBridge {
     ): Long
 
     external fun nativeStart(handle: Long, port: Int): Int
+    external fun nativeDisconnectClients(handle: Long)
     external fun nativeStop(handle: Long)
     external fun nativeDestroy(handle: Long)
 

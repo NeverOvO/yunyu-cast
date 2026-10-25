@@ -24,6 +24,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import io.github.jqssun.airplay.service.AirPlayService
 import io.github.jqssun.airplay.ui.MainScreen
+import io.github.jqssun.airplay.ui.isTvDevice
 import io.github.jqssun.airplay.ui.theme.AirPlayTheme
 import io.github.jqssun.airplay.viewmodel.LocalNetworkAccess
 import io.github.jqssun.airplay.viewmodel.MainViewModel
@@ -86,8 +87,11 @@ class MainActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                combine(viewModel.pref(Prefs.KEEP_SCREEN_ON), viewModel.connectionCount) { keep, conns ->
-                    keep && conns > 0
+                combine(
+                    viewModel.pref(Prefs.KEEP_SCREEN_ON), viewModel.connectionCount,
+                    viewModel.videoPlaybackActive
+                ) { keep, conns, videoActive ->
+                    keep && (conns > 0 || videoActive)
                 }.collect { on ->
                     if (on) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -96,7 +100,8 @@ class MainActivity : ComponentActivity() {
         }
 
         // auto-enter pre-declared in pip params
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        if (!isTvDevice() && packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             lifecycleScope.launch {
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
                     combine(
@@ -116,7 +121,8 @@ class MainActivity : ComponentActivity() {
                     onSurfaceAvailable = { viewModel.onSurfaceAvailable(it) },
                     onSurfaceDestroyed = { viewModel.onSurfaceDestroyed(it) },
                     onPip = { enterPip() },
-                    onLocalNetwork = ::_requestLocalNetwork
+                    onLocalNetwork = ::_requestLocalNetwork,
+                    onExit = ::exitToTv
                 )
             }
         }
@@ -127,7 +133,7 @@ class MainActivity : ComponentActivity() {
 
     private fun _autoStart() {
         val svc = service ?: return
-        if (viewModel.pref(Prefs.AUTO_START).value && svc.serverState.value == AirPlayService.ServerState.STOPPED && hasLocalNetwork()) {
+        if (svc.serverState.value != AirPlayService.ServerState.RUNNING && hasLocalNetwork()) {
             viewModel.startServer()
         }
     }
@@ -165,17 +171,27 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         _syncLocalNetwork()
         _refreshForeground()
+        _autoStart()
+    }
+
+    private fun exitToTv() {
+        service?.endCurrentSession()
+        finish()
     }
 
     fun enterPip() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (isTvDevice() || !packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) ||
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         enterPictureInPictureMode(_pipParams())
     }
 
     private fun _pipParams(): PictureInPictureParams {
         val aspect = if (viewModel.videoPlaybackActive.value) viewModel.videoPlaybackAspect.value
             else viewModel.videoAspect.value
-        val rational = Rational((aspect * 1000).toInt().coerceIn(1, 2390), 1000)
+        // Android accepts PiP ratios only in [1 / 2.39, 2.39]. Portrait phones
+        // and malformed stream metadata must not cause IllegalArgumentException.
+        val ratio = if (aspect.isFinite()) aspect else 16f / 9f
+        val rational = Rational((ratio * 1000).toInt().coerceIn(419, 2390), 1000)
         val builder = PictureInPictureParams.Builder().setAspectRatio(rational)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             builder.setAutoEnterEnabled(_shouldAutoPip())
@@ -184,7 +200,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun _shouldAutoPip(): Boolean =
-        viewModel.serverState.value == AirPlayService.ServerState.RUNNING &&
+        !isTvDevice() && packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
+            viewModel.serverState.value == AirPlayService.ServerState.RUNNING &&
             viewModel.connectionCount.value > 0
 
     override fun onUserLeaveHint() {
@@ -197,15 +214,8 @@ class MainActivity : ComponentActivity() {
         isInPip.value = inPip
     }
 
-    override fun onStop() {
-        super.onStop()
-        // never stop mid-session
-        if (!viewModel.pref(Prefs.RUN_IN_BACKGROUND).value && !isChangingConfigurations &&
-            viewModel.serverState.value == AirPlayService.ServerState.RUNNING &&
-            viewModel.connectionCount.value == 0) {
-            viewModel.stopServer()
-        }
-    }
+    // Leaving the screen never changes receiver availability. The foreground service
+    // remains discoverable for the next phone connection.
 
     override fun onDestroy() {
         service?.let {

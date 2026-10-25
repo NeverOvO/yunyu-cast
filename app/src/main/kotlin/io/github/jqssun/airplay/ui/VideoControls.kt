@@ -68,6 +68,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -116,21 +117,23 @@ fun PlayerButton(
     val interactionSource = remember { MutableInteractionSource() }
     val viewConfiguration = LocalViewConfiguration.current
     val hapticFeedback = LocalHapticFeedback.current
+    val currentClick = rememberUpdatedState(onClick)
+    val currentLongClick = rememberUpdatedState(onLongClick)
+    var longPressed by remember { mutableStateOf(false) }
 
     LaunchedEffect(interactionSource) {
-        var longPressed = false
         interactionSource.interactions.collectLatest { interaction ->
             when (interaction) {
                 is PressInteraction.Press -> {
                     longPressed = false
                     delay(viewConfiguration.longPressTimeoutMillis)
-                    onLongClick?.let {
+                    currentLongClick.value?.let {
                         longPressed = true
                         hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                         it.invoke()
                     }
                 }
-                is PressInteraction.Release -> if (!longPressed) onClick()
+                is PressInteraction.Cancel -> longPressed = false
                 else -> Unit
             }
         }
@@ -149,7 +152,11 @@ fun PlayerButton(
         )
     ) {
         IconButton(
-            onClick = {},
+            // Keep IconButton's real click action for remotes and accessibility.
+            // A long press consumes only its following release click.
+            onClick = {
+                if (longPressed) longPressed = false else currentClick.value()
+            },
             modifier = modifier.focusRing(),
             interactionSource = interactionSource,
             colors = IconButtonDefaults.iconButtonColors().copy(containerColor = containerColor),

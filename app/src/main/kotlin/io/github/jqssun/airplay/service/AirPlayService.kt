@@ -13,6 +13,11 @@ import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.media.AudioManager
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
@@ -57,6 +62,14 @@ import io.github.jqssun.airplay.renderer.AudioRenderer
 import io.github.jqssun.airplay.renderer.VideoRenderer
 import io.github.jqssun.airplay.viewmodel.DebugInfo
 import java.net.NetworkInterface
+import java.util.concurrent.Executors
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import io.github.jqssun.airplay.discovery.lanIpv4Addresses
+import io.github.jqssun.airplay.dlna.DlnaRenderer
+import io.github.jqssun.airplay.dlna.DlnaPlayerController
+import io.github.jqssun.airplay.dlna.DlnaPlaybackSnapshot
 import java.security.SecureRandom
 import kotlin.math.abs
 import kotlin.math.pow
@@ -84,6 +97,54 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     private var wakeLock: PowerManager.WakeLock? = null
     private var foregroundStarted = false
     private var lastOrientation = Configuration.ORIENTATION_UNDEFINED
+    @Volatile private var sessionExitGeneration = 0L
+    @Volatile private var acceptingNativeCallbacks = false
+    private var destroyed = false
+    private val mediaCallbackLock = Any()
+    private val nativeConnectionCount = AtomicInteger()
+    @Volatile private var closingAirPlayUntil = 0L
+
+    private fun isClosingAirPlay(): Boolean = SystemClock.elapsedRealtime() < closingAirPlayUntil
+
+    private val _airPlayDiscoveryStatus = MutableStateFlow("未启动")
+    val airPlayDiscoveryStatus = _airPlayDiscoveryStatus.asStateFlow()
+    private val _dlnaStatus = MutableStateFlow("未启动")
+    val dlnaStatus = _dlnaStatus.asStateFlow()
+    private val _networkAddresses = MutableStateFlow<List<String>>(emptyList())
+    val networkAddresses = _networkAddresses.asStateFlow()
+    private val _playbackError = MutableStateFlow("")
+    val playbackError = _playbackError.asStateFlow()
+
+    // Discovery sockets are started/stopped serially off the UI thread.
+    private val discoveryExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "yunyu-discovery").apply { isDaemon = true }
+    }
+    private val discoveryGeneration = AtomicInteger()
+    private var dlnaRenderer: DlnaRenderer? = null // discoveryExecutor only
+    private var networkCallbackRegistered = false
+    private val networkRefresh = Runnable {
+        if (destroyed) return@Runnable
+        val addresses = lanIpv4Addresses(this)
+        if (addresses != _networkAddresses.value) refreshDiscovery()
+    }
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        private fun schedule() {
+            _mainHandler.removeCallbacks(networkRefresh)
+            _mainHandler.postDelayed(networkRefresh, 1200)
+        }
+        override fun onAvailable(network: Network) = schedule()
+        override fun onLost(network: Network) = schedule()
+        override fun onLinkPropertiesChanged(network: Network, props: LinkProperties) = schedule()
+    }
+
+    // DLNA owns the shared video player only after Play, never while AirPlay is connected.
+    private var dlnaUri = ""
+    private var dlnaMetadata = ""
+    private var dlnaState = "NO_MEDIA_PRESENT"
+    private var dlnaTransportStatus = "OK"
+    @Volatile private var dlnaOwnsPlayer = false
+    private var dlnaStartPositionMs = 0L
+    private var dlnaMuted = false
 
     val videoRenderer = VideoRenderer(this)
     val audioRenderer = AudioRenderer()
@@ -218,6 +279,18 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        _networkAddresses.value = lanIpv4Addresses(this)
+        val cm = getSystemService(ConnectivityManager::class.java)
+        runCatching {
+            cm.registerNetworkCallback(
+                NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(),
+                networkCallback
+            )
+            networkCallbackRegistered = true
+        }.onFailure { log("网络监听无法启动：${it.message}") }
         dacpController = DacpController(this)
         dacpPlayer = DacpPlayer(
             mainLooper,
@@ -309,11 +382,23 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             _videoPlaybackAspect.value = aspect
             _videoPlaybackSize.value = width to height
         }
-        airPlayVideoPlayer.onTitle = { _videoTitle.value = it ?: "" }
+        airPlayVideoPlayer.onTitle = { if (!it.isNullOrBlank()) _videoTitle.value = it }
+        airPlayVideoPlayer.onError = { message ->
+            _playbackError.value = "影片播放失败：$message。片源可能需要登录授权，或格式不受电视支持。"
+            if (dlnaOwnsPlayer) dlnaTransportStatus = "ERROR_OCCURRED"
+            log(_playbackError.value)
+        }
         airPlayVideoPlayer.onEnded = { _endVideoPlayback("AirPlay Video stopped (player)") }
         airPlayVideoPlayer.onPlaybackInfo = { snapshot ->
-            if (nativeHandle != 0L) {
+            if (nativeHandle != 0L && !dlnaOwnsPlayer) {
                 NativeBridge.nativeUpdatePlaybackInfo(nativeHandle, snapshot.position, snapshot.duration, snapshot.rate, snapshot.ready)
+            }
+            if (dlnaOwnsPlayer && _videoPlaybackActive.value) {
+                dlnaState = when {
+                    snapshot.buffering -> "TRANSITIONING"
+                    snapshot.playWhenReady -> "PLAYING"
+                    else -> "PAUSED_PLAYBACK"
+                }
             }
             if (_videoPlaybackActive.value) {
                 _updateVideoPlaybackState(snapshot.position, snapshot.rate)
@@ -348,12 +433,21 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_START_SERVER) {
-            promoteToForeground()
-            _startServer(ensureServiceStarted = false)
-            if (_serverState.value != ServerState.RUNNING) stopSelf(startId)
+        super.onStartCommand(intent, flags, startId)
+        // A null intent is Android restoring the foreground receiver after process reclaim.
+        // Availability is a product invariant, not a switch tied to the current Activity.
+        if (!hasLocalNetwork()) {
+            _failStart()
+            stopSelf(startId)
+            return START_NOT_STICKY
         }
-        return START_NOT_STICKY
+        promoteToForeground()
+        _startServer(ensureServiceStarted = false)
+        if (_serverState.value != ServerState.RUNNING) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        return START_STICKY
     }
 
     fun startServer() {
@@ -361,6 +455,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     private fun _startServer(ensureServiceStarted: Boolean) {
+        if (destroyed) return
         if (_serverState.value == ServerState.RUNNING) return
         if (!hasLocalNetwork()) {
             log("Local network permission denied")
@@ -372,7 +467,12 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "airplay:server").apply { acquire() }
 
-        nsdManager = NsdServiceManager(this).apply { acquireMulticastLock() }
+        _playbackError.value = ""
+        _airPlayDiscoveryStatus.value = "正在发布"
+        nsdManager = NsdServiceManager(this,
+            onStatus = { _airPlayDiscoveryStatus.value = it },
+            log = ::log
+        ).apply { acquireMulticastLock() }
 
         val hwAddr = getHwAddr()
         val keyFile = filesDir.resolve("airplay.pem").absolutePath
@@ -434,6 +534,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         NativeBridge.nativeSetDisplaySize(nativeHandle, w, h, maxFps)
 
         val requestedPort = prefs[Prefs.SERVER_PORT]
+        acceptingNativeCallbacks = true
         val port = NativeBridge.nativeStart(nativeHandle, requestedPort)
         if (port < 0) {
             log("Failed to start on port $requestedPort")
@@ -452,9 +553,10 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             add(MdnsService(resolvedName, "_airplay._tcp", port, airplayTxt))
         }
         if (prefs[Prefs.USB_ONLY]) {
-            usbAdvertiser = UsbMdnsAdvertiser(services) { iface, addr ->
+            _airPlayDiscoveryStatus.value = "仅通过 USB 发布（可在设置切换为所有网络）"
+            usbAdvertiser = UsbMdnsAdvertiser(services, onLink = { iface, addr ->
                 log(if (iface == null) "USB link down" else "USB link up on $iface (${addr?.hostAddress})")
-            }.apply { start() }
+            }).apply { start() }
         } else {
             nsdManager?.register(services)
         }
@@ -464,7 +566,179 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             ContextCompat.startForegroundService(this, Intent(this, AirPlayService::class.java))
         }
         promoteToForeground()
+        _startDlna(effectiveName)
         log("Server started on port $port")
+    }
+
+    fun refreshDiscovery() {
+        if (destroyed) return
+        _networkAddresses.value = lanIpv4Addresses(this)
+        if (_serverState.value != ServerState.RUNNING) return
+        if (!prefs[Prefs.USB_ONLY]) nsdManager?.refresh()
+        val generation = discoveryGeneration.get()
+        discoveryExecutor.execute {
+            if (generation != discoveryGeneration.get()) return@execute
+            runCatching { dlnaRenderer?.refreshNetwork() }
+                .onFailure {
+                    if (generation == discoveryGeneration.get()) _dlnaStatus.value = "刷新失败：${it.message}"
+                    log("DLNA 刷新失败：${it.message}")
+                }
+        }
+        log("刷新局域网设备发现：${_networkAddresses.value.joinToString()}")
+    }
+
+    private fun _startDlna(name: String) {
+        _networkAddresses.value = lanIpv4Addresses(this)
+        val generation = discoveryGeneration.incrementAndGet()
+        _dlnaStatus.value = "正在启动"
+        discoveryExecutor.execute {
+            if (generation != discoveryGeneration.get()) return@execute
+            dlnaRenderer?.stop()
+            val renderer = DlnaRenderer(this, name, dlnaController,
+                onStatus = { if (generation == discoveryGeneration.get()) _dlnaStatus.value = it },
+                log = ::log
+            )
+            dlnaRenderer = renderer
+            runCatching { renderer.start() }.onFailure {
+                renderer.stop()
+                if (generation == discoveryGeneration.get()) _dlnaStatus.value = "启动失败：${it.message}"
+                log("DLNA 启动失败：${it.message}")
+            }
+        }
+    }
+
+    private fun _stopDlna() {
+        discoveryGeneration.incrementAndGet()
+        _dlnaStatus.value = "未启动"
+        if (!discoveryExecutor.isShutdown) discoveryExecutor.execute {
+            dlnaRenderer?.stop()
+            dlnaRenderer = null
+        }
+    }
+
+    private fun <T> _onPlayerThread(action: () -> T): T {
+        if (Looper.myLooper() == Looper.getMainLooper()) return action()
+        val generation = sessionExitGeneration
+        val task = FutureTask<T> {
+            check(generation == sessionExitGeneration) { "本次投屏已结束" }
+            action()
+        }
+        check(_mainHandler.post(task)) { "播放器已关闭" }
+        return try {
+            task.get(3, TimeUnit.SECONDS)
+        } catch (e: Exception) {
+            task.cancel(false)
+            _mainHandler.removeCallbacks(task)
+            throw IllegalStateException(e.cause?.message ?: "播放器响应超时", e)
+        }
+    }
+
+    private fun _ensureDlnaAvailable() {
+        check(!isClosingAirPlay()) { "正在结束上一段投屏，请稍后重新选择电视" }
+        check(_serverState.value == ServerState.RUNNING) { "接收服务已停止" }
+        check(_connectionCount.value == 0 && !_mirroringActive.value) { "AirPlay 正在使用，请先停止屏幕镜像" }
+    }
+
+    private fun _resetDlnaSession() {
+        dlnaUri = ""
+        dlnaMetadata = ""
+        dlnaState = "NO_MEDIA_PRESENT"
+        dlnaTransportStatus = "OK"
+        dlnaOwnsPlayer = false
+        dlnaStartPositionMs = 0
+        if (dlnaMuted) airPlayVideoPlayer.setClientGain(1f)
+        dlnaMuted = false
+    }
+
+    private fun _dlnaTitle(metadata: String): String = runCatching {
+        if (metadata.contains("<!DOCTYPE", ignoreCase = true)) return@runCatching ""
+        val parser = android.util.Xml.newPullParser()
+        parser.setInput(metadata.reader())
+        while (parser.eventType != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+            if (parser.eventType == org.xmlpull.v1.XmlPullParser.START_TAG && parser.name.substringAfter(':') == "title") {
+                return@runCatching parser.nextText().take(256)
+            }
+            parser.next()
+        }
+        ""
+    }.getOrDefault("")
+
+    private val dlnaController = object : DlnaPlayerController {
+        override fun setUri(uri: String, metadata: String) = _onPlayerThread {
+            _ensureDlnaAvailable()
+            if (dlnaOwnsPlayer) _endVideoPlayback("DLNA 更换影片")
+            dlnaUri = uri
+            dlnaMetadata = metadata
+            dlnaStartPositionMs = 0
+            dlnaState = if (uri.isEmpty()) "NO_MEDIA_PRESENT" else "STOPPED"
+            dlnaTransportStatus = "OK"
+            _playbackError.value = ""
+            _videoPlaybackInfo.value = VideoPlaybackInfo(playing = false)
+            log("DLNA 已接收影片")
+        }
+
+        override fun play() = _onPlayerThread {
+            _ensureDlnaAvailable()
+            check(dlnaUri.isNotBlank()) { "尚未收到影片地址" }
+            dlnaTransportStatus = "OK"
+            if (dlnaOwnsPlayer && _videoPlaybackActive.value) {
+                setVideoPlaying(true)
+            } else {
+                dlnaOwnsPlayer = true
+                dlnaState = "TRANSITIONING"
+                airPlayVideoPlayer.setClientGain(if (dlnaMuted) 0f else 1f)
+                _beginVideoPlayback(dlnaUri, dlnaStartPositionMs / 1000f, _dlnaTitle(dlnaMetadata))
+                if (shouldLaunchOnConnect()) launchMainActivity()
+            }
+            log("DLNA 开始播放")
+        }
+
+        override fun pause() = _onPlayerThread {
+            check(dlnaOwnsPlayer && _videoPlaybackActive.value) { "没有正在播放的 DLNA 影片" }
+            setVideoPlaying(false)
+        }
+
+        override fun stop() = _onPlayerThread {
+            if (dlnaOwnsPlayer) _endVideoPlayback("DLNA 停止播放")
+            dlnaState = if (dlnaUri.isEmpty()) "NO_MEDIA_PRESENT" else "STOPPED"
+            dlnaStartPositionMs = 0
+        }
+
+        override fun seek(positionMs: Long) = _onPlayerThread {
+            _ensureDlnaAvailable()
+            check(dlnaUri.isNotBlank()) { "尚未收到影片地址" }
+            val duration = _videoPlaybackInfo.value.durationMs
+            dlnaStartPositionMs = positionMs.coerceIn(0, if (duration > 0) duration else Long.MAX_VALUE)
+            if (dlnaOwnsPlayer) seekVideoTo(dlnaStartPositionMs)
+        }
+
+        override fun setVolume(percent: Int) = _onPlayerThread {
+            _ensureDlnaAvailable()
+            val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, (percent.coerceIn(0, 100) / 100f * max).roundToInt(), 0)
+        }
+
+        override fun setMute(muted: Boolean) = _onPlayerThread {
+            _ensureDlnaAvailable()
+            dlnaMuted = muted
+            if (dlnaOwnsPlayer) airPlayVideoPlayer.setClientGain(if (muted) 0f else 1f)
+            Unit
+        }
+
+        override fun snapshot(): DlnaPlaybackSnapshot = _onPlayerThread {
+            val info = _videoPlaybackInfo.value
+            val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+            DlnaPlaybackSnapshot(
+                uri = dlnaUri,
+                metadata = dlnaMetadata,
+                state = dlnaState,
+                positionMs = if (dlnaOwnsPlayer) info.positionMs else dlnaStartPositionMs,
+                durationMs = if (dlnaUri.isNotEmpty()) info.durationMs else 0,
+                volume = (audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) * 100f / max).roundToInt(),
+                muted = dlnaMuted,
+                transportStatus = dlnaTransportStatus
+            )
+        }
     }
 
     private fun _orientationFollowsDevice(): Boolean =
@@ -501,15 +775,10 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     private fun _failStart() {
-        audioRenderer.detachEngine()
-        if (nativeHandle != 0L) {
-            NativeBridge.nativeDestroy(nativeHandle)
-            nativeHandle = 0L
-        }
-        nsdManager?.release()
-        nsdManager = null
-        wakeLock?.release()
-        wakeLock = null
+        // A start failure can also follow permission loss while a session is alive.
+        // Use the complete teardown path so stale counts, player state and locks reset.
+        _shutdown()
+        _airPlayDiscoveryStatus.value = "启动失败，请查看日志"
         _serverState.value = ServerState.ERROR
         if (foregroundStarted) {
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
@@ -532,6 +801,14 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     private fun _shutdown() {
+        _serverState.value = ServerState.STOPPED
+        acceptingNativeCallbacks = false
+        sessionExitGeneration++
+        synchronized(mediaCallbackLock) { /* Native teardown must not race renderer work. */ }
+        closingAirPlayUntil = 0L
+        _stopDlna()
+        _airPlayDiscoveryStatus.value = "未启动"
+        _resetDlnaSession()
         audioRenderer.detachEngine()
         if (nativeHandle != 0L) {
             NativeBridge.nativeStop(nativeHandle)
@@ -558,10 +835,16 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         _trackInfo.value = TrackInfo()
         _positionMs.value = 0
         _durationMs.value = 0
+        _progressBaseTime = 0
+        _videoLocation.value = null
+        _videoTitle.value = ""
+        clearPin()
         _serverState.value = ServerState.STOPPED
         _connectionCount.value = 0
+        nativeConnectionCount.set(0)
         _clientVol = null
         _clientVolDriveEnd()
+        _restoreServerVolume()
         _applyClientVol()
         _refreshDacpPlayer()
         log("Server stopped")
@@ -584,6 +867,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     fun setVideoPlaying(playing: Boolean) {
+        if (dlnaOwnsPlayer) dlnaState = if (playing) "PLAYING" else "PAUSED_PLAYBACK"
         airPlayVideoPlayer.setPlaying(playing)
     }
 
@@ -607,6 +891,47 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         airPlayVideoPlayer.seekBy(deltaMs)
     }
 
+    /** Ends only the current media session; the listeners, foreground service and discovery stay up. */
+    fun endCurrentSession() {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        val hadAirPlay = nativeConnectionCount.get() > 0 || _mirroringActive.value ||
+            (_videoPlaybackActive.value && !dlnaOwnsPlayer)
+        synchronized(mediaCallbackLock) {
+            sessionExitGeneration++
+            closingAirPlayUntil = if (hadAirPlay) SystemClock.elapsedRealtime() + 2500L else 0L
+            audioRenderer.stop()
+            videoRenderer.stopSession()
+        }
+        _videoPollSuppressed = true
+        _lastVideoPollAt = 0
+        _endVideoPlayback("已退出本次投屏，接收保持开启")
+        _resetDlnaSession()
+        clearPin()
+        _mirroringActive.value = false
+        _audioOnly.value = false
+        _videoLocation.value = null
+        _videoTitle.value = ""
+        _videoPlaybackInfo.value = VideoPlaybackInfo(playing = false)
+        _coverArtBytes = null
+        _trackInfo.value = TrackInfo()
+        _positionMs.value = 0
+        _durationMs.value = 0
+        _progressBaseTime = 0
+        dacpController?.reset()
+        _clientVol = null
+        _clientVolDriveEnd()
+        _restoreServerVolume()
+        _applyClientVol()
+        mediaSession?.isActive = false
+        _refreshDacpPlayer()
+        _updateMediaNotification()
+        if (nativeHandle != 0L) {
+            // The native HTTP worker owns connection teardown. No server or mDNS restart.
+            NativeBridge.nativeDisconnectClients(nativeHandle)
+        }
+        log("界面已退出，继续接收下一次投屏")
+    }
+
     fun stopVideoPlayback() = _endVideoPlayback("AirPlay Video stopped (local)")
 
     fun downloadVideo() {
@@ -618,13 +943,30 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         // lingering polls after a stop must not bounce the UI back to a pending session
         _videoPollSuppressed = true
         _videoPlaybackActive.value = false
+        if (dlnaOwnsPlayer) {
+            dlnaState = if (dlnaUri.isEmpty()) "NO_MEDIA_PRESENT" else "STOPPED"
+            dlnaOwnsPlayer = false
+            dlnaStartPositionMs = 0
+            _videoPlaybackInfo.value = VideoPlaybackInfo(playing = false)
+        }
         airPlayVideoPlayer.stop()
         if (!_audioOnly.value) mediaSession?.isActive = false
         log(message)
     }
 
     override fun onDestroy() {
-        stopServer()
+        destroyed = true
+        _mainHandler.removeCallbacks(networkRefresh)
+        if (networkCallbackRegistered) {
+            runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkCallback) }
+            networkCallbackRegistered = false
+        }
+        _shutdown()
+        airPlayVideoPlayer.release()
+        _mainHandler.removeCallbacksAndMessages(null)
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        foregroundStarted = false
+        discoveryExecutor.shutdown()
         dacpPlayer.release()
         mediaReceiver?.let {
             try { unregisterReceiver(it) } catch (_: Exception) {}
@@ -641,69 +983,109 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         super.onDestroy()
     }
 
-    // RaopCallbackHandler (called from native threads)
+    // Native protocol workers must never mutate session/UI state concurrently with Back,
+    // DLNA or service teardown. Frame/format work stays synchronous on the media threads.
+    private fun postNativeState(allowClosing: Boolean = false, block: () -> Unit) {
+        if (!acceptingNativeCallbacks) return
+        val generation = sessionExitGeneration
+        _mainHandler.post {
+            if (!acceptingNativeCallbacks || generation != sessionExitGeneration ||
+                (!allowClosing && isClosingAirPlay())) return@post
+            block()
+        }
+    }
 
     override fun onVideoData(data: ByteArray, ntpTimeNs: Long, isH265: Boolean) {
-        videoRenderer.feedFrame(data, ntpTimeNs, isH265)
+        synchronized(mediaCallbackLock) {
+            if (!acceptingNativeCallbacks || isClosingAirPlay()) return
+            videoRenderer.feedFrame(data, ntpTimeNs, isH265)
+        }
     }
 
     override fun onVideoSessionPoll() {
-        _lastVideoPollAt = SystemClock.elapsedRealtime()
+        synchronized(mediaCallbackLock) {
+            if (!acceptingNativeCallbacks || isClosingAirPlay()) return
+            _lastVideoPollAt = SystemClock.elapsedRealtime()
+        }
     }
 
     override fun onVideoPlay(location: String, startPositionSeconds: Float) {
+        postNativeState {
+            _resetDlnaSession()
+            _beginVideoPlayback(location, startPositionSeconds)
+            log("AirPlay 视频开始播放")
+        }
+    }
+
+    private fun _beginVideoPlayback(location: String, startPositionSeconds: Float, title: String = "") {
+        _playbackError.value = ""
         _videoLocation.value = location
         _videoPlaySeq.value++
         _videoPollSuppressed = false
         _videoPlaybackInfo.value = VideoPlaybackInfo(positionMs = (startPositionSeconds * 1000).toLong())
         _videoPlaybackAspect.value = 16f / 9f
         _videoPlaybackSize.value = null
-        _videoTitle.value = ""
+        _videoTitle.value = title
         _videoPlaybackActive.value = true
         airPlayVideoPlayer.play(location, startPositionSeconds)
-        // claim media-button routing for keys that arrive as media-session events
         mediaSession?.isActive = true
-        log("AirPlay Video play: $location @ ${startPositionSeconds}s")
     }
 
     override fun onVideoScrub(positionSeconds: Float) {
-        airPlayVideoPlayer.scrub(positionSeconds)
+        postNativeState {
+            if (!dlnaOwnsPlayer) airPlayVideoPlayer.scrub(positionSeconds)
+        }
     }
 
     override fun onVideoRate(rate: Float) {
-        airPlayVideoPlayer.setRate(rate)
+        postNativeState {
+            if (!dlnaOwnsPlayer) airPlayVideoPlayer.setRate(rate)
+        }
     }
 
-    override fun onVideoStop() = _endVideoPlayback("AirPlay Video stopped")
+    override fun onVideoStop() {
+        postNativeState {
+            if (!dlnaOwnsPlayer) _endVideoPlayback("AirPlay Video stopped")
+        }
+    }
 
     override fun onAudioFormat(ct: Int, spf: Int, usingScreen: Boolean) {
-        clearPin()
-        audioRenderer.start()
-        audioRenderer.setFormat(ct, spf)
-        if (!usingScreen) _setPlaying(true)
-        if (!usingScreen && !_audioOnly.value) {
-            // pure music streaming (not screen mirroring audio)
-            _setAudioOnly(true)
+        synchronized(mediaCallbackLock) {
+            if (!acceptingNativeCallbacks || isClosingAirPlay()) return
+            // The native RTP worker may decode immediately after this callback returns.
+            audioRenderer.start()
+            audioRenderer.setFormat(ct, spf)
+            postNativeState {
+                clearPin()
+                if (!usingScreen) _setPlaying(true)
+                if (!usingScreen && !_audioOnly.value) _setAudioOnly(true)
+                log("Audio format: ct=$ct spf=$spf screen=$usingScreen")
+            }
         }
-        log("Audio format: ct=$ct spf=$spf screen=$usingScreen")
     }
 
     override fun onVideoSize(srcW: Float, srcH: Float, w: Float, h: Float) {
-        clearPin()
-        if (w > 0 && h > 0) {
-            _videoAspect.value = w / h
-            _videoResolution.value = "${w.toInt()}x${h.toInt()}"
-            videoRenderer.setResolution(w.toInt(), h.toInt())
-            _mirroringActive.value = true
+        synchronized(mediaCallbackLock) {
+            if (!acceptingNativeCallbacks || isClosingAirPlay()) return
+            val valid = w.isFinite() && h.isFinite() && w > 0 && h > 0
+            if (valid) videoRenderer.setResolution(w.toInt(), h.toInt())
+            postNativeState {
+                clearPin()
+                if (valid) {
+                    _videoAspect.value = w / h
+                    _videoResolution.value = "${w.toInt()}x${h.toInt()}"
+                    _mirroringActive.value = true
+                }
+                log("Video size: ${srcW}x${srcH} -> ${w}x${h}")
+            }
         }
-        log("Video size: ${srcW}x${srcH} -> ${w}x${h}")
     }
 
     override fun onClientVolume(db: Float) {
-        val frac = _dbToFrac(db)
-        _clientVol = frac
-        Log.d(TAG, "sender volume ${db}dB, frac $frac")
-        _mainHandler.post {
+        postNativeState {
+            val frac = _dbToFrac(db)
+            _clientVol = frac
+            Log.d(TAG, "sender volume ${db}dB, frac $frac")
             val driving = _clientVolTarget >= 0f
             if (driving) _clientVolStep()
             if (!driving || !_syncClientVol) _applyClientVol()
@@ -744,6 +1126,12 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             _pendingServerVolEchoes++
             audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, idx, 0)
         }
+    }
+
+    private fun _restoreServerVolume() {
+        if (_serverPreZeroIdx < 0) return
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, _serverPreZeroIdx, 0)
+        _serverPreZeroIdx = -1
     }
 
     private fun _setClientGain(gain: Float) {
@@ -794,41 +1182,53 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onConnectionInit() {
-        val firstConnection = _connectionCount.value == 0
-        _connectionCount.value++
-        log("Sender connected (${_connectionCount.value})")
-        if (firstConnection && shouldLaunchOnConnect()) launchMainActivity()
+        if (!acceptingNativeCallbacks) return
+        nativeConnectionCount.incrementAndGet()
+        postNativeState(allowClosing = true) {
+            val firstConnection = _connectionCount.value == 0
+            _connectionCount.value++
+            if (isClosingAirPlay()) {
+                if (nativeHandle != 0L) NativeBridge.nativeDisconnectClients(nativeHandle)
+                return@postNativeState
+            }
+            if (dlnaOwnsPlayer) _endVideoPlayback("切换至 AirPlay")
+            _resetDlnaSession()
+            log("Sender connected (${_connectionCount.value})")
+            if (firstConnection && shouldLaunchOnConnect()) launchMainActivity()
+        }
     }
 
     override fun onConnectionDestroy() {
-        _connectionCount.value = (_connectionCount.value - 1).coerceAtLeast(0)
-        if (_connectionCount.value == 0) {
-            // clients may drop without POST /stop; must run before the poll-state reset
-            _endVideoPlayback("AirPlay Video stopped (disconnect)")
-            // last client gone: release audio output devices to save power
-            audioRenderer.stop()
-            _audioOnly.value = false
-            _lastVideoPollAt = 0
-            _videoPollSuppressed = false
-            _coverArtBytes = null
-            _trackInfo.value = TrackInfo()
-            _positionMs.value = 0
-            _durationMs.value = 0
-            dacpController?.reset()
-            _clientVol = null
-            _mainHandler.post {
+        if (!acceptingNativeCallbacks) return
+        nativeConnectionCount.updateAndGet { (it - 1).coerceAtLeast(0) }
+        postNativeState(allowClosing = true) {
+            _connectionCount.value = (_connectionCount.value - 1).coerceAtLeast(0)
+            if (_connectionCount.value == 0) {
+                // Teardown may complete after DLNA has already started another film.
+                // Only clear AirPlay state; never deactivate that new player's media session.
+                if (!dlnaOwnsPlayer) _endVideoPlayback("AirPlay Video stopped (disconnect)")
+                audioRenderer.stop()
+                _audioOnly.value = false
+                _lastVideoPollAt = 0
+                _videoPollSuppressed = isClosingAirPlay()
+                _coverArtBytes = null
+                _trackInfo.value = TrackInfo()
+                _positionMs.value = 0
+                _durationMs.value = 0
+                _progressBaseTime = 0
+                dacpController?.reset()
+                _clientVol = null
                 _clientVolDriveEnd()
-                if (_serverPreZeroIdx >= 0) {
-                    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, _serverPreZeroIdx, 0)
-                    _serverPreZeroIdx = -1
+                if (!dlnaOwnsPlayer) {
+                    _restoreServerVolume()
+                    _applyClientVol()
+                    mediaSession?.isActive = false
                 }
-                _applyClientVol()
+                _refreshDacpPlayer()
+                _updateMediaNotification()
             }
-            mediaSession?.isActive = false
-            _refreshDacpPlayer()
-            _updateMediaNotification()
+            log("Sender disconnected (${_connectionCount.value})")
         }
-        log("Sender disconnected (${_connectionCount.value})")
     }
 
     override fun onConnectionReset(reason: Int) {
@@ -836,60 +1236,81 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onDisplayPin(pin: String) {
-        if (_lastPin == pin) return
-        _lastPin = pin
-        pinCallback?.invoke(pin)
-        _updateMediaNotification()
+        postNativeState {
+            if (_lastPin == pin) return@postNativeState
+            _lastPin = pin
+            pinCallback?.invoke(pin)
+            _updateMediaNotification()
+        }
     }
 
     override fun onMetadata(data: ByteArray) {
+        if (!acceptingNativeCallbacks || isClosingAirPlay()) return
+        val generation = sessionExitGeneration
         val map = DmapParser.parse(data)
-        val info = TrackInfo.fromDmap(map, _trackInfo.value.coverArt)
-        _trackInfo.value = info
-        if (info.durationMs > 0) _durationMs.value = info.durationMs
-        _updateMediaMetadata()
-        _refreshDacpPlayer()
-        log("Track: ${info.artist} - ${info.title}")
+        postNativeState {
+            if (generation != sessionExitGeneration) return@postNativeState
+            val info = TrackInfo.fromDmap(map, _trackInfo.value.coverArt)
+            _trackInfo.value = info
+            if (info.durationMs > 0) _durationMs.value = info.durationMs
+            _updateMediaMetadata()
+            _refreshDacpPlayer()
+            log("Track: ${info.artist} - ${info.title}")
+        }
     }
 
     override fun onCoverArt(data: ByteArray) {
+        // Keep image decoding off the main thread; capture the session before decoding.
+        if (!acceptingNativeCallbacks || isClosingAirPlay()) return
+        val generation = sessionExitGeneration
         val bmp = BitmapFactory.decodeByteArray(data, 0, data.size) ?: return
-        _coverArtBytes = data
-        _trackInfo.value = _trackInfo.value.copy(coverArt = bmp)
-        _updateMediaMetadata()
-        _refreshDacpPlayer()
+        postNativeState {
+            if (generation != sessionExitGeneration) return@postNativeState
+            _coverArtBytes = data
+            _trackInfo.value = _trackInfo.value.copy(coverArt = bmp)
+            _updateMediaMetadata()
+            _refreshDacpPlayer()
+        }
     }
 
     override fun onProgress(start: Long, curr: Long, end: Long) {
-        val rate = 44100.0
-        val posMs = ((curr - start) / rate * 1000).toLong().coerceAtLeast(0)
-        val durMs = ((end - start) / rate * 1000).toLong().coerceAtLeast(0)
-        // pause/resume transitions emit degenerate progress; keep the last good value
-        if (durMs <= 0) return
-        _positionMs.value = posMs
-        _durationMs.value = durMs
-        _progressBaseMs = posMs
-        _progressBaseTime = SystemClock.elapsedRealtime()
-        _playing.value = true
-        _updatePlaybackState()
-        _refreshDacpPlayer()
+        postNativeState {
+            val rate = 44100.0
+            val posMs = ((curr - start) / rate * 1000).toLong().coerceAtLeast(0)
+            val durMs = ((end - start) / rate * 1000).toLong().coerceAtLeast(0)
+            // pause/resume transitions emit degenerate progress; keep the last good value
+            if (durMs <= 0) return@postNativeState
+            _positionMs.value = posMs
+            _durationMs.value = durMs
+            _progressBaseMs = posMs
+            _progressBaseTime = SystemClock.elapsedRealtime()
+            _playing.value = true
+            _updatePlaybackState()
+            _refreshDacpPlayer()
+        }
     }
 
     override fun onAudioTeardown() {
-        _setPlaying(false)
+        postNativeState { _setPlaying(false) }
     }
 
     override fun onDacpId(dacpId: String, activeRemote: String) {
-        dacpController?.update(dacpId, activeRemote)
-        log("DACP: $dacpId")
+        postNativeState {
+            dacpController?.update(dacpId, activeRemote)
+            log("DACP: $dacpId")
+        }
     }
 
     override fun onMirrorRunning(running: Boolean) {
-        if (running) videoRenderer.startSession() else {
-            videoRenderer.stopSession()
-            _mirroringActive.value = false
+        synchronized(mediaCallbackLock) {
+            if (!acceptingNativeCallbacks || isClosingAirPlay()) return
+            // Must precede the first frame on this same native worker.
+            if (running) videoRenderer.startSession() else videoRenderer.stopSession()
+            postNativeState {
+                if (!running) _mirroringActive.value = false
+                _setAudioOnly(!running && _connectionCount.value > 0)
+            }
         }
-        _setAudioOnly(!running)
     }
 
     private fun _setAudioOnly(audioOnly: Boolean) {
@@ -999,7 +1420,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     private var _lastVideoStateAtMs = 0L
 
     private fun _refreshDacpPlayer() {
-        _mainHandler.post { dacpPlayer.refresh() }
+        _mainHandler.post { if (!destroyed) dacpPlayer.refresh() }
     }
 
     private fun clearPin() {
@@ -1143,7 +1564,9 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     private fun launchMainActivity() {
-        Handler(Looper.getMainLooper()).post {
+        val generation = sessionExitGeneration
+        _mainHandler.post {
+            if (generation != sessionExitGeneration || isClosingAirPlay() || _serverState.value != ServerState.RUNNING) return@post
             val launchIntent = Intent(this, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
             try {

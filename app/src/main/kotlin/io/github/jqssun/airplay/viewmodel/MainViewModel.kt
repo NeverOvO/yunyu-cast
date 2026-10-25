@@ -1,10 +1,12 @@
 package io.github.jqssun.airplay.viewmodel
 
 import android.app.Application
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.os.SystemClock
 import android.view.Surface
+import android.widget.Toast
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -17,6 +19,8 @@ import io.github.jqssun.airplay.observe
 import io.github.jqssun.airplay.service.AirPlayService
 import io.github.jqssun.airplay.service.AirPlayService.ServerState
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,6 +30,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.IOException
 import kotlin.math.abs
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -96,6 +101,15 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
 
     private val _serverState = MutableStateFlow(ServerState.STOPPED)
     val serverState: StateFlow<ServerState> = _serverState.asStateFlow()
+
+    private val _airPlayDiscoveryStatus = MutableStateFlow("未启动")
+    val airPlayDiscoveryStatus: StateFlow<String> = _airPlayDiscoveryStatus.asStateFlow()
+    private val _dlnaStatus = MutableStateFlow("未启动")
+    val dlnaStatus: StateFlow<String> = _dlnaStatus.asStateFlow()
+    private val _networkAddresses = MutableStateFlow<List<String>>(emptyList())
+    val networkAddresses: StateFlow<List<String>> = _networkAddresses.asStateFlow()
+    private val _playbackError = MutableStateFlow("")
+    val playbackError: StateFlow<String> = _playbackError.asStateFlow()
 
     private val _connectionCount = MutableStateFlow(0)
     val connectionCount: StateFlow<Int> = _connectionCount.asStateFlow()
@@ -195,67 +209,51 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
     // logs
     private val _logs = MutableStateFlow<List<String>>(emptyList())
     val logs: StateFlow<List<String>> = _logs.asStateFlow()
-    private val _logLock = Any()
-    private val _logList = mutableListOf<String>()
+    private val logStore = BufferedLogStore(logFile) { _logs.value = it }
     private val _dateFmt = object : ThreadLocal<SimpleDateFormat>() {
         override fun initialValue() = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     }
 
-    init {
-        loadPersistedLogs()
-    }
-
     fun addLog(msg: String) {
-        val line = "${_dateFmt.get()!!.format(Date())} $msg"
-        val snapshot: List<String>
-        synchronized(_logLock) {
-            _logList.add(line)
-            while (_logList.size > 9999) _logList.removeAt(0)
-            persistLogsLocked()
-            snapshot = _logList.toList()
-        }
-        _logs.value = snapshot
+        logStore.append("${_dateFmt.get()!!.format(Date())} $msg")
     }
 
-    fun clearLogs() {
-        synchronized(_logLock) {
-            _logList.clear()
-            runCatching { logFile.delete() }
-        }
-        _logs.value = emptyList()
-    }
+    fun clearLogs() = logStore.clear()
 
     fun exportLogs() {
         val ctx = getApplication<Application>()
-        val file = File(ctx.cacheDir, "airplay_logs.txt")
-        file.writeText(_logList.joinToString("\n"))
-        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        viewModelScope.launch {
+            val file = withContext(Dispatchers.IO) {
+                try {
+                    File(ctx.cacheDir, "airplay_logs.txt").also {
+                        it.writeText(logStore.snapshot().joinToString("\n"))
+                    }
+                } catch (_: IOException) {
+                    null
+                }
+            }
+            if (file == null) {
+                Toast.makeText(ctx, "日志保存失败，请检查电视可用存储空间", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            val chooserTitle = ctx.getString(io.github.jqssun.airplay.R.string.export_logs_chooser_title)
+            try {
+                ctx.startActivity(Intent.createChooser(intent, chooserTitle).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (_: ActivityNotFoundException) {
+                Toast.makeText(ctx, "这台电视未提供日志分享功能", Toast.LENGTH_LONG).show()
+            }
         }
-        val chooserTitle = ctx.getString(io.github.jqssun.airplay.R.string.export_logs_chooser_title)
-        ctx.startActivity(Intent.createChooser(intent, chooserTitle).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
-    private fun loadPersistedLogs() {
-        val snapshot: List<String>
-        synchronized(_logLock) {
-            val restored = runCatching {
-                if (logFile.exists()) logFile.readLines().takeLast(9999) else emptyList()
-            }.getOrDefault(emptyList())
-            _logList.clear()
-            _logList.addAll(restored)
-            snapshot = _logList.toList()
-        }
-        _logs.value = snapshot
-    }
-
-    private fun persistLogsLocked() {
-        runCatching {
-            logFile.writeText(_logList.joinToString("\n"))
-        }
+    override fun onCleared() {
+        logStore.closeAsync()
+        super.onCleared()
     }
 
     // service binding
@@ -266,6 +264,15 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
 
     fun unbindService() {
         service = null
+        _serverState.value = ServerState.STOPPED
+        _connectionCount.value = 0
+        _videoPlaybackActive.value = false
+        _videoSessionPending.value = false
+        _mirroringActive.value = false
+        _airPlayDiscoveryStatus.value = "接收服务未连接"
+        _dlnaStatus.value = "接收服务未连接"
+        _networkAddresses.value = emptyList()
+        _playbackError.value = ""
     }
 
     fun startServer() {
@@ -274,6 +281,10 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
 
     fun stopServer() {
         service?.stopServer()
+    }
+
+    fun refreshDiscovery() {
+        service?.refreshDiscovery()
     }
 
     fun onSurfaceAvailable(surface: Surface) {
@@ -377,6 +388,10 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
     fun updateFromService() {
         service?.let {
             _serverState.value = it.serverState.value
+            _airPlayDiscoveryStatus.value = it.airPlayDiscoveryStatus.value
+            _dlnaStatus.value = it.dlnaStatus.value
+            _networkAddresses.value = it.networkAddresses.value
+            _playbackError.value = it.playbackError.value
             _connectionCount.value = it.connectionCount.value
             _videoAspect.value = it.videoAspect.value
             _videoResolution.value = it.videoResolution.value

@@ -71,15 +71,24 @@ class DecoderSelector(private val ctx: Context) {
         return info.takeIf { !_canMeet(avcCaps, w, h, fps) && _canMeet(info.videoCaps(HEVC), w, h, fps) }
     }
 
-    fun software(mime: String, w: Int, h: Int): MediaCodecInfo? =
-        MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.firstOrNull { info ->
+    private fun softwareDecoders(mime: String, w: Int, h: Int): List<MediaCodecInfo> =
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { info ->
             !info.isEncoder && info.supportsMime(mime) &&
                 (if (Build.VERSION.SDK_INT >= 29) info.isSoftwareOnly
                 else info.name.lowercase().let {
                     it.startsWith("omx.google.") || it.startsWith("c2.android.") ||
                         (!it.startsWith("omx.") && !it.startsWith("c2."))
-                })
-        }?.takeIf { _portraitSafe(w, h, it.videoCaps(mime)::isSizeSupported) }
+                }) && supportsSize(info, mime, w, h)
+        }
+
+    // A listed decoder can reject a real stream; try the remaining suitable
+    // hardware decoders before a software fallback at the same resolution.
+    fun fallbacks(mime: String, w: Int, h: Int): List<MediaCodecInfo> =
+        (_decoders(mime).filter { supportsSize(it, mime, w, h) } + softwareDecoders(mime, w, h))
+            .distinctBy { it.name }
+
+    private fun supportsSize(info: MediaCodecInfo, mime: String, w: Int, h: Int): Boolean =
+        runCatching { _portraitSafe(w, h, info.videoCaps(mime)::isSizeSupported) }.getOrDefault(false)
 
     fun adaptive(info: MediaCodecInfo, mime: String) = !_inList(noAdaptive, info.name) &&
         runCatching { info.getCapabilitiesForType(mime).isFeatureSupported(CodecCapabilities.FEATURE_AdaptivePlayback) }

@@ -34,19 +34,35 @@ class VideoPipeline {
     private var hasFrame = false
 
     private var surfaceTexture: SurfaceTexture? = null
-    var inputSurface: Surface? = null; private set
+    @Volatile var inputSurface: Surface? = null; private set
+    val isRunning: Boolean get() = running
 
     @Volatile private var frameAvailable = false
     private var pendingDisplay: Surface? = null
     private var displayDirty = false
+    private var sizeDirty = false
     @Volatile private var videoW = 0
     @Volatile private var videoH = 0
 
     fun start() = synchronized(lock) {
         if (running) return@synchronized
+        check(thread?.isAlive != true) { "Video pipeline is still releasing" }
         running = true
+        hasFrame = false
+        frameAvailable = false
+        displayDirty = true
         thread = Thread({ _loop() }, "VideoPipeline").also { it.start() }
-        while (inputSurface == null && running) lock.wait()
+        val deadline = System.nanoTime() + 3_000_000_000L
+        while (inputSurface == null && running) {
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0) {
+                running = false
+                lock.notifyAll()
+                error("Video pipeline initialization timed out")
+            }
+            lock.wait((remaining / 1_000_000L).coerceAtLeast(1L))
+        }
+        check(inputSurface != null && running) { "Video pipeline initialization failed" }
     }
 
     fun setDisplaySurface(surface: Surface?) = synchronized(lock) {
@@ -55,57 +71,68 @@ class VideoPipeline {
         lock.notifyAll()
     }
 
-    fun setVideoSize(w: Int, h: Int) {
+    fun setVideoSize(w: Int, h: Int) = synchronized(lock) {
         videoW = w
         videoH = h
-        surfaceTexture?.setDefaultBufferSize(w, h)
+        sizeDirty = true
+        lock.notifyAll()
     }
 
     fun release() {
-        synchronized(lock) {
-            if (!running) return
+        val worker = synchronized(lock) {
             running = false
             lock.notifyAll()
+            thread
         }
-        thread?.join()
-        thread = null
+        // A broken EGL driver must not indefinitely block the service's main thread.
+        worker?.join(2_000)
+        if (worker?.isAlive == true) Log.w(TAG, "GL teardown still pending")
     }
 
     private fun _loop() {
         try {
             egl = EglCore()
             _initGl()
-        } catch (e: Exception) {
-            Log.e(TAG, "GL init failed", e)
-            synchronized(lock) { running = false; lock.notifyAll() }
-            return
-        }
-        Matrix.setIdentityM(texMatrix, 0)
-        synchronized(lock) {
-            inputSurface = Surface(surfaceTexture)
-            lock.notifyAll()
-        }
-        while (true) {
-            var newDisplay: Surface? = null
-            var displayChanged = false
-            var doFrame = false
+            Matrix.setIdentityM(texMatrix, 0)
             synchronized(lock) {
-                while (running && !frameAvailable && !displayDirty) lock.wait()
-                if (running && displayDirty) {
-                    newDisplay = pendingDisplay
-                    displayChanged = true
-                    displayDirty = false
-                }
-                if (running && frameAvailable) {
-                    frameAvailable = false
-                    doFrame = true
-                }
+                if (!running) return
+                inputSurface = Surface(surfaceTexture)
+                lock.notifyAll()
             }
-            if (!running) break
-            if (displayChanged) _bindDisplay(newDisplay)
-            if (doFrame) _consumeAndDraw()
+            while (true) {
+                var newDisplay: Surface? = null
+                var displayChanged = false
+                var doFrame = false
+                val resize: Boolean
+                synchronized(lock) {
+                    while (running && !frameAvailable && !displayDirty && !sizeDirty) lock.wait()
+                    if (running && displayDirty) {
+                        newDisplay = pendingDisplay
+                        displayChanged = true
+                        displayDirty = false
+                    }
+                    if (running && frameAvailable) {
+                        frameAvailable = false
+                        doFrame = true
+                    }
+                    resize = sizeDirty
+                    sizeDirty = false
+                }
+                if (!running) break
+                if (resize && videoW > 0 && videoH > 0) surfaceTexture?.setDefaultBufferSize(videoW, videoH)
+                if (displayChanged) _bindDisplay(newDisplay)
+                if (doFrame) _consumeAndDraw()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Video pipeline failed", e)
+        } finally {
+            _releaseGl()
+            synchronized(lock) {
+                running = false
+                thread = null
+                lock.notifyAll()
+            }
         }
-        _releaseGl()
     }
 
     private fun _bindDisplay(surface: Surface?) {
@@ -121,7 +148,12 @@ class VideoPipeline {
             Log.w(TAG, "eglCreateWindowSurface failed: ${EGL14.eglGetError()}")
             return
         }
-        egl.makeCurrent(window)
+        if (!egl.makeCurrent(window)) {
+            egl.destroySurface(window)
+            window = EGL14.EGL_NO_SURFACE
+            egl.makeCurrent()
+            return
+        }
         winW = egl.query(window, EGL14.EGL_WIDTH)
         winH = egl.query(window, EGL14.EGL_HEIGHT)
         // an idle source sends no new frames, so repaint last one or new surface stays black
@@ -131,18 +163,14 @@ class VideoPipeline {
     private fun _consumeAndDraw() {
         val st = surfaceTexture ?: return
         val egl = egl ?: return
-        if (window == EGL14.EGL_NO_SURFACE) {
-            // no display: keep consuming so decoder doesn't stall
-            egl.makeCurrent()
-            st.updateTexImage()
-            hasFrame = true
-            return
-        }
-        egl.makeCurrent(window)
+        // Continue consuming on the pbuffer while the Activity surface is absent.
+        // Also refresh its transform there: the phone can rotate while hidden.
+        val canDraw = window != EGL14.EGL_NO_SURFACE && egl.makeCurrent(window)
+        if (!canDraw) check(egl.makeCurrent()) { "Cannot activate video GL context" }
         st.updateTexImage()
         st.getTransformMatrix(texMatrix)
         hasFrame = true
-        _render()
+        if (canDraw) _render()
     }
 
     private fun _render() {
@@ -159,7 +187,12 @@ class VideoPipeline {
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         GLES20.glDisableVertexAttribArray(aPos)
         GLES20.glDisableVertexAttribArray(aTex)
-        egl?.swap(window)
+        val core = egl ?: return
+        if (!core.swap(window)) {
+            core.makeCurrent()
+            core.destroySurface(window)
+            window = EGL14.EGL_NO_SURFACE
+        }
     }
 
     private fun _initGl() {
@@ -192,6 +225,13 @@ class VideoPipeline {
             GLES20.glLinkProgram(it)
             GLES20.glDeleteShader(vs)
             GLES20.glDeleteShader(fs)
+            val linked = IntArray(1)
+            GLES20.glGetProgramiv(it, GLES20.GL_LINK_STATUS, linked, 0)
+            if (linked[0] == 0) {
+                val message = GLES20.glGetProgramInfoLog(it)
+                GLES20.glDeleteProgram(it)
+                error("Video shader link failed: $message")
+            }
         }
     }
 
@@ -201,21 +241,27 @@ class VideoPipeline {
             GLES20.glCompileShader(it)
             val ok = IntArray(1)
             GLES20.glGetShaderiv(it, GLES20.GL_COMPILE_STATUS, ok, 0)
-            if (ok[0] == 0) Log.e(TAG, "shader compile failed: ${GLES20.glGetShaderInfoLog(it)}")
+            if (ok[0] == 0) {
+                val message = GLES20.glGetShaderInfoLog(it)
+                GLES20.glDeleteShader(it)
+                error("Video shader compile failed: $message")
+            }
         }
     }
 
     private fun _releaseGl() {
-        surfaceTexture?.release()
+        runCatching { surfaceTexture?.setOnFrameAvailableListener(null) }
+        runCatching { surfaceTexture?.release() }
         surfaceTexture = null
-        inputSurface?.release()
+        runCatching { inputSurface?.release() }
         inputSurface = null
         egl?.let {
-            if (window != EGL14.EGL_NO_SURFACE) it.destroySurface(window)
-            it.close()
+            runCatching { if (window != EGL14.EGL_NO_SURFACE) it.destroySurface(window) }
+            runCatching { it.close() }
         }
         egl = null
         window = EGL14.EGL_NO_SURFACE
+        hasFrame = false
     }
 
     companion object {

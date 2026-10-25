@@ -21,10 +21,13 @@ import java.util.concurrent.TimeUnit
 import kotlin.random.Random
 
 /**
- * mDNS responder for usb tether links (usb0/ncm0/rndis0) on Android 16 and below
+ * mDNS responder for USB tethering, or a named LAN interface where system NSD is unavailable.
+ * LAN responders share a host name so a Wi-Fi/Ethernet bridge cannot make them suppress each other.
  */
 class UsbMdnsAdvertiser(
     private val services: List<MdnsService>,
+    private val networkInterfaceName: String? = null,
+    private val onStatus: (String) -> Unit = {},
     private val onLink: (iface: String?, addr: Inet4Address?) -> Unit,
 ) {
     private class Link(val name: String, val addr: Inet4Address, val mask: Int, val socket: MulticastSocket) {
@@ -41,9 +44,12 @@ class UsbMdnsAdvertiser(
     private val running get() = stopped.count > 0
     private var thread: Thread? = null
     private val main = Handler(Looper.getMainLooper())
-    private val host = listOf("airplay-usb-%06x".format(Random.nextInt(0x1000000)), "local")
+    private val host = listOf(
+        if (networkInterfaceName == null) "airplay-usb-%06x".format(Random.nextInt(0x1000000)) else LAN_HOST,
+        "local",
+    )
 
-    private var link: Link? = null
+    @Volatile private var link: Link? = null
     private var state = State.CHECKING
     private var checkUntil = 0L
     private var nextQuery = 0L
@@ -52,13 +58,14 @@ class UsbMdnsAdvertiser(
     private var nextAnnounce = 0L
 
     fun start() {
-        thread = Thread(::_loop, "usb-mdns").apply { isDaemon = true; start() }
+        if (thread != null || !running) return
+        thread = Thread(::_loop, "yunyu-mdns-${networkInterfaceName ?: "usb"}").apply { isDaemon = true; start() }
     }
 
     fun stop() {
         stopped.countDown()
-        thread?.join(STOP_TIMEOUT_MS)
-        thread = null
+        // NSD calls this on main. The worker wakes within RECEIVE_TIMEOUT_MS (or immediately
+        // from its latch wait), sends its goodbye, then closes its own socket in finally.
     }
 
     private fun _loop() {
@@ -86,7 +93,10 @@ class UsbMdnsAdvertiser(
                 if (running) _onPacket(l, packet)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "USB mDNS loop failed", e)
+            if (running) {
+                Log.w(TAG, "mDNS loop failed", e)
+                _status("兼容广播失败：${e.message ?: e.javaClass.simpleName}")
+            }
         } finally {
             link?.let {
                 _close(it)
@@ -96,21 +106,30 @@ class UsbMdnsAdvertiser(
     }
 
     private fun _scan(now: Long) {
-        val found = try { _findUsb() } catch (_: SocketException) { return }
+        val found = try { _findLink() } catch (_: SocketException) { return }
         val prev = link
         if (found?.first?.name == prev?.name && found?.second?.address == prev?.addr) return
         prev?.let(::_close)
         val l = found?.let { (ni, ia) -> _open(ni, ia) }
         link = l
-        if (l != null) _check(now)
+        if (l != null) _check(now) else _status("等待局域网地址")
         if (l?.name != prev?.name || l?.addr != prev?.addr) _report(l)
     }
 
     private fun _report(l: Link?) = main.post { if (running) onLink(l?.name, l?.addr) }
 
-    private fun _findUsb() = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
-        .filter { USB_IFACE.matches(it.name) && it.isUp }
-        .firstNotNullOfOrNull { ni -> ni.interfaceAddresses.firstOrNull { it.address is Inet4Address }?.let { ni to it } }
+    private fun _status(status: String) = main.post { if (running) onStatus(status) }
+
+    private fun _findLink() = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+        .filter {
+            (if (networkInterfaceName == null) USB_IFACE.matches(it.name) else it.name == networkInterfaceName) &&
+                it.isUp && !it.isLoopback
+        }
+        .firstNotNullOfOrNull { ni ->
+            ni.interfaceAddresses.firstOrNull {
+                it.address is Inet4Address && !it.address.isLinkLocalAddress && !it.address.isLoopbackAddress
+            }?.let { ni to it }
+        }
 
     private fun _open(ni: NetworkInterface, ia: InterfaceAddress): Link? {
         val socket = MulticastSocket(null)
@@ -122,11 +141,12 @@ class UsbMdnsAdvertiser(
             socket.timeToLive = 255
             socket.soTimeout = RECEIVE_TIMEOUT_MS
             val prefix = ia.networkPrefixLength.toInt()
-            Log.i(TAG, "USB link ${ni.name} ${ia.address.hostAddress}/$prefix")
+            Log.i(TAG, "mDNS link ${ni.name} ${ia.address.hostAddress}/$prefix")
             Link(ni.name, ia.address as Inet4Address, if (prefix <= 0) 0 else -1 shl (32 - prefix), socket)
         } catch (e: Exception) {
             socket.close()
             Log.w(TAG, "Cannot open mDNS socket on ${ni.name}", e)
+            _status("兼容广播无法绑定 ${ni.name}")
             null
         }
     }
@@ -139,6 +159,7 @@ class UsbMdnsAdvertiser(
 
     private fun _check(now: Long) {
         state = State.CHECKING
+        _status("正在检查局域网广播")
         checkUntil = now + CHECK_MS
         nextQuery = now
     }
@@ -149,6 +170,7 @@ class UsbMdnsAdvertiser(
                 now >= checkUntil -> {
                     Log.i(TAG, "Advertising on ${l.name}")
                     state = State.ACTIVE
+                    _status("兼容广播已启动")
                     announced = 0
                     nextAnnounce = now
                 }
@@ -204,6 +226,7 @@ class UsbMdnsAdvertiser(
             Log.i(TAG, "Another responder covers ${l.name}, staying quiet")
         }
         state = State.YIELDED
+        _status("已检测到系统或同名设备广播")
         nextQuery = now + RECHECK_MS
     }
 
@@ -339,12 +362,12 @@ class UsbMdnsAdvertiser(
 
     companion object {
         private const val TAG = "UsbMdnsAdvertiser"
+        private val LAN_HOST = "yunyu-lan-%06x".format(Random.nextInt(0x1000000))
         private val USB_IFACE = Regex("(usb|rndis|ncm)\\d+")
         private const val MDNS_PORT = 5353
         private val GROUP = InetSocketAddress(InetAddress.getByName("224.0.0.251"), MDNS_PORT)
         private const val SCAN_MS = 2000L
         private const val RECEIVE_TIMEOUT_MS = 250
-        private const val STOP_TIMEOUT_MS = 1000L
         private const val CHECK_MS = 2500L
         private const val CHECK_QUERY_MS = 1000L
         private const val RECHECK_MS = 15_000L

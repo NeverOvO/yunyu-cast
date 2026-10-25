@@ -26,6 +26,13 @@ class BoolPref(key: String, def: Boolean, restart: Boolean) : Pref<Boolean>(key,
     override fun SharedPreferences.Editor.store(v: Boolean) { putBoolean(key, v) }
 }
 
+class AlwaysOnPref(key: String) : Pref<Boolean>(key, true, false) {
+    override fun parse(s: String) = s.toBooleanStrictOrNull()?.takeIf { it }
+    override fun valid(v: Boolean) = v
+    override fun SharedPreferences.load() = true
+    override fun SharedPreferences.Editor.store(v: Boolean) { putBoolean(key, true) }
+}
+
 class IntPref(key: String, def: Int, val range: IntRange, restart: Boolean) : Pref<Int>(key, def, restart) {
     override fun parse(s: String) = s.toIntOrNull()
     override fun valid(v: Int) = v in range
@@ -62,6 +69,9 @@ object Prefs {
     private val _all = mutableListOf<Pref<*>>()
     val all: Map<String, Pref<*>> by lazy { _all.associateBy { it.key } }
 
+    // Family TV mode has no user-facing receive/power switch, including stale saved values.
+    private fun alwaysOn(key: String) = AlwaysOnPref(key).also(_all::add)
+
     private fun bool(key: String, def: Boolean, restart: Boolean = false) =
         BoolPref(key, def, restart).also(_all::add)
     private fun int(key: String, def: Int, range: IntRange, restart: Boolean = false) =
@@ -72,11 +82,11 @@ object Prefs {
 
     fun forced(v: String) = when (v) { ON -> true; OFF -> false; else -> null }
 
-    val SERVER_NAME = str("server_name", "Android AirPlay", restart = true)
+    val SERVER_NAME = str("server_name", "云屿投屏", restart = true)
     val SERVER_PORT = int("server_port", 7000, 1..65535, restart = true)
-    val AUTO_START = bool("auto_start", true)
-    val BOOT_AUTO_START = bool("boot_auto_start", true)
-    val RUN_IN_BACKGROUND = bool("run_in_background", true)
+    val AUTO_START = alwaysOn("auto_start")
+    val BOOT_AUTO_START = alwaysOn("boot_auto_start")
+    val RUN_IN_BACKGROUND = alwaysOn("run_in_background")
     val H265 = tri("h265", restart = true)
     val ENFORCE_SDR = bool("enforce_sdr", true, restart = true)
     val KEY_ALLOW_FRAME_DROP = bool(MediaFormat.KEY_ALLOW_FRAME_DROP, true, restart = true)
@@ -97,7 +107,8 @@ object Prefs {
     val AAC_ENABLED = bool("aac_enabled", true, restart = true)
     // on: sender volume drives receiver volume; off: volume = receiver volume x sender volume
     val SYNC_CLIENT_VOLUME = bool("sync_client_volume", true)
-    val RESOLUTION = str("resolution", AUTO, restart = true) { it in setOf(AUTO, PORTRAIT, LANDSCAPE) || SIZE.matches(it) }
+    // Advertised mirroring target; the sender and decoder determine the actual stream size.
+    val RESOLUTION = str("resolution", "3840x2160", restart = true) { it in setOf(AUTO, PORTRAIT, LANDSCAPE) || SIZE.matches(it) }
     val MAX_FPS = int("max_fps", 60, 1..Int.MAX_VALUE, restart = true)
     val OVERSCANNED = bool("overscanned", false, restart = true)
     val REQUIRE_PIN = bool("require_pin", false, restart = true)
@@ -112,6 +123,6 @@ object Prefs {
     val ADVERTISE_VIDEO = bool("advertise_video", true, restart = true)
     val ADVERTISE_MIRRORING = bool("advertise_mirroring", true, restart = true)
     val ADVERTISE_AUDIO = bool("advertise_audio", true, restart = true)
-    val LAUNCH_ON_CONNECT = bool("launch_on_connect", true)
+    val LAUNCH_ON_CONNECT = alwaysOn("launch_on_connect")
     val USB_ONLY = bool("usb_only", false, restart = true)
 }

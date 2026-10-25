@@ -72,7 +72,16 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeInit(
     raop_set_log_callback(ctx->raop, _log_callback, NULL);
 
     const char *keyfile_c = env->GetStringUTFChars(keyFile, NULL);
-    const char *name_c = env->GetStringUTFChars(name, NULL);
+    const char *name_c = keyfile_c ? env->GetStringUTFChars(name, NULL) : NULL;
+
+    if (!keyfile_c || !name_c) {
+        if (keyfile_c) env->ReleaseStringUTFChars(keyFile, keyfile_c);
+        if (name_c) env->ReleaseStringUTFChars(name, name_c);
+        raop_destroy(ctx->raop);
+        android_callbacks_destroy(&ctx->cb_ctx, env);
+        delete ctx;
+        return 0;
+    }
 
     char device_id[18];
     snprintf(device_id, sizeof(device_id), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -83,6 +92,12 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeInit(
     int ret = raop_init2(ctx->raop, nohold ? 1 : 0, device_id, keyfile_c);
     if (ret < 0) {
         LOGE("raop_init2 failed: %d", ret);
+        env->ReleaseStringUTFChars(keyFile, keyfile_c);
+        env->ReleaseStringUTFChars(name, name_c);
+        raop_destroy(ctx->raop);
+        android_callbacks_destroy(&ctx->cb_ctx, env);
+        delete ctx;
+        return 0;
     }
 
     if (requirePin) {
@@ -90,7 +105,12 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeInit(
         int pin = random_pin();
         if (pin < 0) {
             LOGE("Failed to generate random pin");
-            pin = 1234;
+            env->ReleaseStringUTFChars(keyFile, keyfile_c);
+            env->ReleaseStringUTFChars(name, name_c);
+            raop_destroy(ctx->raop);
+            android_callbacks_destroy(&ctx->cb_ctx, env);
+            delete ctx;
+            return 0;
         }
         raop_set_plist(ctx->raop, "pin", pin + 10000);
     }
@@ -101,9 +121,14 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeInit(
     ctx->dnssd = dnssd_init(name_c, (int)strlen(name_c), ctx->hw_addr, 6, &dns_err, pin_pw);
     if (!ctx->dnssd) {
         LOGE("dnssd_init failed: %d", dns_err);
-    } else {
-        raop_set_dnssd(ctx->raop, ctx->dnssd);
+        env->ReleaseStringUTFChars(keyFile, keyfile_c);
+        env->ReleaseStringUTFChars(name, name_c);
+        raop_destroy(ctx->raop);
+        android_callbacks_destroy(&ctx->cb_ctx, env);
+        delete ctx;
+        return 0;
     }
+    raop_set_dnssd(ctx->raop, ctx->dnssd);
 
     env->ReleaseStringUTFChars(keyFile, keyfile_c);
     env->ReleaseStringUTFChars(name, name_c);
@@ -147,12 +172,25 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeStart(
 
 extern "C"
 JNIEXPORT void JNICALL
+Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeDisconnectClients(
+        JNIEnv *env, jobject thiz, jlong handle) {
+    server_ctx_t *ctx = (server_ctx_t *)(intptr_t)handle;
+    if (!ctx || !ctx->raop) return;
+    /* Kotlin invokes this on the service main thread, serialized with native destruction.
+       UxPlay queues teardown on its HTTP worker; listeners and mDNS remain active. */
+    android_callbacks_interrupt_playback_wait(&ctx->cb_ctx, 0);
+    raop_disconnect_clients(ctx->raop);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
 Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeStop(
         JNIEnv *env, jobject thiz, jlong handle) {
 
     server_ctx_t *ctx = (server_ctx_t *)(intptr_t)handle;
     if (!ctx || !ctx->raop) return;
 
+    android_callbacks_interrupt_playback_wait(&ctx->cb_ctx, 1);
     raop_stop_httpd(ctx->raop);
     LOGI("AirPlay server stopped");
 
@@ -171,6 +209,8 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeDestroy(
     if (!ctx) return;
 
     if (ctx->raop) {
+        android_callbacks_interrupt_playback_wait(&ctx->cb_ctx, 1);
+        raop_stop_httpd(ctx->raop);
         raop_destroy(ctx->raop);
         ctx->raop = NULL;
     }

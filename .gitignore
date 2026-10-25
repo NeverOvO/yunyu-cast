@@ -5,8 +5,24 @@
 .DS_Store
 /build/
 /app/build/
-/captures
+/captures/
 .externalNativeBuild/
 .cxx/
 
+# Private signing material and local credentials
 *.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+
+# Distribute binaries and source archives through GitHub Releases
+/dist/
+*.apk
+*.aab
+*.idsig
+*.log

@@ -1,0 +1,4 @@
+Use case: logo-brand
+Asset type: Android TV launcher banner, horizontal 16:9 aspect ratio.
+Use the supplied transparent Yunyu Cast app emblem as an identity reference. Keep its sapphire screen, ivory cloud, blue island and small coral play symbol visually consistent.
+Design a polished, restrained television launcher tile on a solid deep navy #101E35 background. Place the emblem on the left half, crisp and large. On the right place the exact Chinese app name 云屿投屏 in large, beautifully spaced, white modern sans-serif Chinese typography. Beneath in much smaller pale blue text put AirPlay. Use balanced generous margins; at small tile size the four Chinese characters must remain easily readable. No other text. No extra decorative panels, no gradients, no stars, no additional logos, no rounded outer corners. Full-bleed rectangular tile. This is a finished flat banner asset, not a mockup.

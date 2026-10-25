@@ -11,6 +11,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
@@ -38,7 +39,7 @@ suspend fun FocusRequester.requestFocusUntilLanded(
     isFocused: (() -> Boolean)? = null,
 ): Boolean {
     repeat(attempts) {
-        val requested = runCatching { requestFocus() }.isSuccess
+        val requested = runCatching { requestFocus(FocusDirection.Enter) }.getOrDefault(false)
         if (isFocused?.invoke() ?: requested) return true
         withFrameNanos { }
         if (isFocused?.invoke() == true) return true

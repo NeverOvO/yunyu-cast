@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardActions
@@ -49,15 +50,11 @@ fun SettingsScreen(viewModel: MainViewModel) {
     val advertiseVideo by viewModel.pref(Prefs.ADVERTISE_VIDEO).collectAsState()
     val advertiseMirroring by viewModel.pref(Prefs.ADVERTISE_MIRRORING).collectAsState()
     val advertiseAudio by viewModel.pref(Prefs.ADVERTISE_AUDIO).collectAsState()
-    val launchOnConnect by viewModel.pref(Prefs.LAUNCH_ON_CONNECT).collectAsState()
     val maxFps by viewModel.pref(Prefs.MAX_FPS).collectAsState()
     val overscanned by viewModel.pref(Prefs.OVERSCANNED).collectAsState()
     val requirePin by viewModel.pref(Prefs.REQUIRE_PIN).collectAsState()
     val allowNewConn by viewModel.pref(Prefs.ALLOW_NEW_CONN).collectAsState()
     val usbOnly by viewModel.pref(Prefs.USB_ONLY).collectAsState()
-    val autoStart by viewModel.pref(Prefs.AUTO_START).collectAsState()
-    val bootAutoStart by viewModel.pref(Prefs.BOOT_AUTO_START).collectAsState()
-    val runInBackground by viewModel.pref(Prefs.RUN_IN_BACKGROUND).collectAsState()
     val serverPort by viewModel.pref(Prefs.SERVER_PORT).collectAsState()
     val audioLatencyMs by viewModel.pref(Prefs.AUDIO_LATENCY_MS).collectAsState()
     val forceSwAlac by viewModel.pref(Prefs.FORCE_SW_ALAC).collectAsState()
@@ -85,8 +82,61 @@ fun SettingsScreen(viewModel: MainViewModel) {
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(vertical = 8.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
+        SectionHeader(stringResource(R.string.section_display))
+
+        SettingResolution(
+            value = resolution,
+            onValueChange = { viewModel.set(Prefs.RESOLUTION, it) }
+        )
+
+        SettingChipField(
+            title = "镜像目标帧率",
+            description = "选择 60 帧以获得更流畅的画面，网络不稳时可切换为 30 帧。更改后重新连接投屏。",
+            value = maxFps.toString(),
+            presets = listOf("30" to "30 帧 / 秒", "60" to "60 帧 / 秒"),
+            placeholder = stringResource(R.string.setting_max_fps_placeholder),
+            keyboardType = KeyboardType.Number,
+            onValueChange = { it.toIntOrNull()?.let { v -> viewModel.set(Prefs.MAX_FPS, v) } }
+        )
+
+        val ctx = LocalContext.current
+        val lifecycleOwner = LocalLifecycleOwner.current
+        var hasOverlayPermission by remember { mutableStateOf(canAutoLaunch(ctx)) }
+        DisposableEffect(lifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_RESUME) hasOverlayPermission = canAutoLaunch(ctx)
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
+        ListItem(
+            modifier = Modifier
+                .dpadFocus(RectangleShape)
+                .clickable(enabled = !hasOverlayPermission) { _openOverlaySettings(ctx) },
+            headlineContent = { Text("投屏时自动打开画面") },
+            supportingContent = {
+                Text(if (hasOverlayPermission) "退出页面后，手机再次投屏会自动显示。"
+                     else "请在电视系统中允许显示在其他应用上层，方便下次直接投屏。")
+            },
+            trailingContent = { Text(if (hasOverlayPermission) "已开启" else "去开启") }
+        )
+
+        ListItem(
+            headlineContent = { Text("自动接收已开启") },
+            supportingContent = { Text("无需开关。手机停止投屏即可；遥控器返回退出画面后，电视仍可接收下一次投屏。") }
+        )
+
+
+        SettingSwitch(
+            title = stringResource(R.string.setting_developer_options),
+            description = stringResource(R.string.setting_developer_options_desc),
+            checked = developerOptions,
+            onCheckedChange = { viewModel.set(Prefs.DEVELOPER_OPTIONS, it) }
+        )
+
+        if (developerOptions) {
         SectionHeader(stringResource(R.string.section_server))
 
         SettingTextField(
@@ -100,20 +150,6 @@ fun SettingsScreen(viewModel: MainViewModel) {
             value = serverPort.toString(),
             onCommit = { viewModel.set(Prefs.SERVER_PORT, it.toInt()) },
             range = Prefs.SERVER_PORT.range
-        )
-
-        SettingSwitch(
-            title = stringResource(R.string.setting_boot_auto_start),
-            description = stringResource(R.string.setting_boot_auto_start_desc),
-            checked = bootAutoStart,
-            onCheckedChange = { viewModel.set(Prefs.BOOT_AUTO_START, it) }
-        )
-
-        SettingSwitch(
-            title = stringResource(R.string.setting_run_in_background),
-            description = stringResource(R.string.setting_run_in_background_desc),
-            checked = runInBackground,
-            onCheckedChange = { viewModel.set(Prefs.RUN_IN_BACKGROUND, it) }
         )
 
         SectionHeader(stringResource(R.string.section_connection))
@@ -143,63 +179,11 @@ fun SettingsScreen(viewModel: MainViewModel) {
             onCheckedChange = { viewModel.set(Prefs.ALLOW_NEW_CONN, it) }
         )
 
-        val ctx = LocalContext.current
-        val lifecycleOwner = LocalLifecycleOwner.current
-        var hasOverlayPermission by remember { mutableStateOf(canAutoLaunch(ctx)) }
-        DisposableEffect(lifecycleOwner) {
-            val observer = LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_RESUME) hasOverlayPermission = canAutoLaunch(ctx)
-            }
-            lifecycleOwner.lifecycle.addObserver(observer)
-            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-        }
-        val needsOverlayPermission = launchOnConnect && !hasOverlayPermission
-        val autoLaunch = launchOnConnect && hasOverlayPermission
-        ListItem(
-            modifier = Modifier
-                .dpadFocus(RectangleShape)
-                .toggleable(
-                    value = autoLaunch,
-                    role = Role.Switch,
-                    onValueChange = {
-                        viewModel.set(Prefs.LAUNCH_ON_CONNECT, it)
-                        if (it && !canAutoLaunch(ctx)) _openOverlaySettings(ctx)
-                    }
-                ),
-            headlineContent = { Text(stringResource(R.string.setting_launch_on_connect)) },
-            supportingContent = {
-                Text(stringResource(
-                    if (needsOverlayPermission) R.string.setting_launch_on_connect_no_permission
-                    else R.string.setting_launch_on_connect_desc
-                ))
-            },
-            trailingContent = {
-                Switch(checked = autoLaunch, onCheckedChange = null)
-            }
-        )
-
-        SectionHeader(stringResource(R.string.section_display))
-
         SettingSwitch(
             title = stringResource(R.string.setting_auto_fullscreen),
             description = stringResource(R.string.setting_auto_fullscreen_desc),
             checked = autoFullscreen,
             onCheckedChange = { viewModel.set(Prefs.AUTO_FULLSCREEN, it) }
-        )
-
-        SettingResolution(
-            value = resolution,
-            onValueChange = { viewModel.set(Prefs.RESOLUTION, it) }
-        )
-
-        SettingChipField(
-            title = stringResource(R.string.setting_max_fps),
-            description = stringResource(R.string.setting_max_fps_desc),
-            value = maxFps.toString(),
-            presets = listOf("24" to "24", "30" to "30", "60" to "60", "120" to "120"),
-            placeholder = stringResource(R.string.setting_max_fps_placeholder),
-            keyboardType = KeyboardType.Number,
-            onValueChange = { it.toIntOrNull()?.let { v -> viewModel.set(Prefs.MAX_FPS, v) } }
         )
 
         SettingSwitch(
@@ -239,23 +223,6 @@ fun SettingsScreen(viewModel: MainViewModel) {
             checked = syncClientVolume,
             onCheckedChange = { viewModel.set(Prefs.SYNC_CLIENT_VOLUME, it) }
         )
-
-        SectionHeader(stringResource(R.string.section_developer))
-
-        SettingSwitch(
-            title = stringResource(R.string.setting_developer_options),
-            description = stringResource(R.string.setting_developer_options_desc),
-            checked = developerOptions,
-            onCheckedChange = { viewModel.set(Prefs.DEVELOPER_OPTIONS, it) }
-        )
-
-        if (developerOptions) {
-            SettingSwitch(
-                title = stringResource(R.string.setting_auto_start),
-                description = stringResource(R.string.setting_auto_start_desc),
-                checked = autoStart,
-                onCheckedChange = { viewModel.set(Prefs.AUTO_START, it) }
-            )
 
             SettingSwitch(
                 title = stringResource(R.string.setting_keep_screen_on),
@@ -474,9 +441,9 @@ private fun SettingResolution(
 ) {
     val presets = listOf(
         Prefs.AUTO to stringResource(R.string.chip_auto),
-        "1280x720" to "1280x720",
-        "1920x1080" to "1920x1080",
-        "3840x2160" to "3840x2160"
+        "1920x1080" to "1080p · 1920 × 1080",
+        "2560x1440" to "2K · 2560 × 1440",
+        "3840x2160" to "4K · 3840 × 2160"
     )
     val devicePresets = listOf(
         Prefs.PORTRAIT to stringResource(R.string.chip_device_portrait),
@@ -489,10 +456,10 @@ private fun SettingResolution(
     var height by remember(value) { mutableStateOf(if (isPreset) "" else parts.getOrElse(1) { "" }) }
 
     ListItem(
-        headlineContent = { Text(stringResource(R.string.setting_resolution)) },
+        headlineContent = { Text("镜像目标分辨率") },
         supportingContent = {
             Column {
-                Text(stringResource(R.string.setting_resolution_desc))
+                Text("默认尝试 4K 60 帧。实际画质取决于发送设备、电视解码能力和网络；视频 App 直接播放的清晰度由片源及 App 决定。更改后重新连接投屏。")
                 Spacer(Modifier.height(8.dp))
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     @Composable

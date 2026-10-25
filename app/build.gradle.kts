@@ -11,7 +11,7 @@ val localProps = Properties().apply {
     rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use(::load)
 }
 
-val allAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+val allAbis = listOf("arm64-v8a", "armeabi-v7a")
 
 android {
     namespace = "io.github.jqssun.airplay"
@@ -30,11 +30,11 @@ android {
     }
 
     defaultConfig {
-        applicationId = "io.github.jqssun.airplay"
-        minSdk = 23
+        applicationId = "com.yunyulai.tvcast"
+        minSdk = 26
         targetSdk = 37
-        versionCode = 36
-        versionName = "0.0.36"
+        versionCode = 5
+        versionName = "0.4.1-preview.1"
 
         externalNativeBuild {
             cmake {
@@ -112,6 +112,7 @@ tasks.configureEach {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime)

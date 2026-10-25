@@ -1,0 +1,46 @@
+name: 投屏问题反馈
+description: 反馈设备发现、连接、画面、声音或遥控操作问题。
+title: "[问题] "
+body:
+  - type: input
+    id: version
+    attributes:
+      label: 云屿投屏版本
+      placeholder: 例如 0.4.1-preview.1
+    validations:
+      required: true
+  - type: textarea
+    id: devices
+    attributes:
+      label: 设备与系统
+      description: 填写电视完整型号、Android 版本、手机型号与系统版本、视频 App 名称。
+    validations:
+      required: true
+  - type: dropdown
+    id: casting
+    attributes:
+      label: 投屏入口
+      options:
+        - iPhone 屏幕镜像
+        - 视频 App 的 TV / 投屏按钮
+        - AirPlay 音频或影片
+        - 电视界面 / 遥控器
+        - 其他
+  - type: textarea
+    id: steps
+    attributes:
+      label: 操作步骤与实际表现
+      description: 说明如何触发、原本期望什么，以及是否每次发生。
+    validations:
+      required: true
+  - type: textarea
+    id: network
+    attributes:
+      label: 网络与画质设置
+      description: 电视接网线还是 Wi-Fi、手机是否在同一局域网，以及分辨率与帧率选项。无需提供公网 IP 或密码。
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: 从连接帮助中获取问题发生前后几行。发出前移除密码、带令牌的视频 URL、个人设备名称和其他私人信息。
+      render: text

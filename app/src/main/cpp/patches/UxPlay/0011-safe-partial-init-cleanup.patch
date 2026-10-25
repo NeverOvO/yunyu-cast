@@ -1,0 +1,7 @@
+diff --git a/lib/raop.c b/lib/raop.c
+--- a/lib/raop.c
++++ b/lib/raop.c
+@@ -858,1 +858,2 @@
+-    httpd_stop(raop->httpd);
++    /* raop_init2 can fail before the HTTP daemon has been allocated. */
++    if (raop->httpd) httpd_stop(raop->httpd);

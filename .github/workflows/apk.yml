@@ -1,50 +1,44 @@
-name: Generate APK
-
-env:
-  main_project_module: app
+name: Manual unsigned APK build
 
 on:
-  push:
-    branches:
-      - "release/**"
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
 
-      - name: Set TAG
-        run: |
-          echo "version=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' ${{ env.main_project_module }}/build.gradle.kts)" >> $GITHUB_ENV
-
-      - name: Use JDK
+      - name: Set up JDK 21
         uses: actions/setup-java@v6
         with:
-          distribution: "zulu"
-          java-version: "21"
-          cache: "gradle"
+          distribution: zulu
+          java-version: '21'
+          cache: gradle
 
-      - name: Build
+      - name: Install Android build dependencies
         run: |
-          export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
-          echo ${{ secrets.STORE }} | base64 -d > upload.jks
-          echo ${{ secrets.LOCAL }} | base64 -d > local.properties
-          chmod +x ./gradlew;
-          ./gradlew assembleRelease bundleRelease --stacktrace
-          rm upload.jks local.properties
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-37" "build-tools;36.0.0" \
+            "ndk;27.0.12077973" "cmake;3.22.1"
 
-      - name: Publish (GitHub)
-        uses: softprops/action-gh-release@v3
+      - name: Build unsigned release APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleRelease \
+            -x lintVitalAnalyzeRelease -x lintVitalReportRelease -x lintVitalRelease \
+            --console=plain
+
+      - name: Upload unsigned APK
+        uses: actions/upload-artifact@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          name: v${{ env.version }}
-          tag_name: v${{ env.version }}
-          files: |
-            ${{ env.main_project_module }}/build/outputs/apk/release/app-release.apk
-            ${{ env.main_project_module }}/build/outputs/bundle/release/app-release.aab
+          name: yunyu-cast-unsigned
+          path: app/build/outputs/apk/release/app-release-unsigned.apk
+          if-no-files-found: error
+          retention-days: 14

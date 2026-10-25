@@ -15,24 +15,35 @@ class EglCore : AutoCloseable {
     private val pbuffer: EGLSurface
 
     init {
-        EGL14.eglInitialize(display, IntArray(2), 0, IntArray(2), 1)
-        val attribs = intArrayOf(
-            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
-            EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
-            EGL14.EGL_NONE
-        )
-        val configs = arrayOfNulls<EGLConfig>(1)
-        EGL14.eglChooseConfig(display, attribs, 0, configs, 0, 1, IntArray(1), 0)
-        config = configs[0] ?: error("no egl config")
-        context = EGL14.eglCreateContext(
-            display, config, EGL14.EGL_NO_CONTEXT,
-            intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0
-        )
-        pbuffer = EGL14.eglCreatePbufferSurface(
-            display, config, intArrayOf(EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE), 0
-        )
-        makeCurrent()
+        var newContext = EGL14.EGL_NO_CONTEXT
+        var newPbuffer = EGL14.EGL_NO_SURFACE
+        try {
+            check(display != EGL14.EGL_NO_DISPLAY &&
+                EGL14.eglInitialize(display, IntArray(2), 0, IntArray(2), 1)) { "EGL initialization failed" }
+            val attribs = intArrayOf(
+                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
+                EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_NONE
+            )
+            val configs = arrayOfNulls<EGLConfig>(1)
+            check(EGL14.eglChooseConfig(display, attribs, 0, configs, 0, 1, IntArray(1), 0)) { "EGL config query failed" }
+            config = configs[0] ?: error("No EGL config")
+            newContext = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT,
+                intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
+            check(newContext != EGL14.EGL_NO_CONTEXT) { "EGL context creation failed" }
+            newPbuffer = EGL14.eglCreatePbufferSurface(display, config,
+                intArrayOf(EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE), 0)
+            check(newPbuffer != EGL14.EGL_NO_SURFACE) { "EGL pbuffer creation failed" }
+            check(EGL14.eglMakeCurrent(display, newPbuffer, newPbuffer, newContext)) { "EGL makeCurrent failed" }
+            context = newContext
+            pbuffer = newPbuffer
+        } catch (error: Exception) {
+            if (newPbuffer != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, newPbuffer)
+            if (newContext != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, newContext)
+            if (display != EGL14.EGL_NO_DISPLAY) EGL14.eglTerminate(display)
+            throw error
+        }
     }
 
     fun makeCurrent(surface: EGLSurface = pbuffer) = EGL14.eglMakeCurrent(display, surface, surface, context)

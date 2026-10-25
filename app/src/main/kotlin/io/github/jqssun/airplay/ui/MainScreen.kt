@@ -94,8 +94,10 @@ fun MainScreen(
     onSurfaceAvailable: (android.view.Surface) -> Unit,
     onSurfaceDestroyed: (android.view.Surface) -> Unit,
     onPip: () -> Unit = {},
-    onLocalNetwork: () -> Unit = {}
+    onLocalNetwork: () -> Unit = {},
+    onExit: () -> Unit = {}
 ) {
+    BackHandler(enabled = !isInPip) { onExit() }
     var tab by remember { mutableStateOf(Tab.OVERVIEW) }
     var fullscreen by remember { mutableStateOf(false) }
     val pin by viewModel.pinCode.collectAsState()
@@ -105,6 +107,7 @@ fun MainScreen(
     val videoSessionPending by viewModel.videoSessionPending.collectAsState()
     val mirroringActive by viewModel.mirroringActive.collectAsState()
     val autoFullscreen by viewModel.pref(Prefs.AUTO_FULLSCREEN).collectAsState()
+    val television = isTv()
 
     // don't use movableContentOf: moving AndroidView across subcomposition boundaries makes it crash on reparent
     val video: @Composable () -> Unit = {
@@ -212,15 +215,20 @@ fun MainScreen(
             onDispose { brightnessState?.clearOverride() }
         }
         // orientation follows the video aspect; manual rotate holds until the next video
-        LaunchedEffect(videoPlaybackAspect) {
-            activity?.requestedOrientation = if (videoPlaybackAspect < 1f) {
+        LaunchedEffect(videoPlaybackAspect, television) {
+            activity?.requestedOrientation = if (television) {
+                ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            } else if (videoPlaybackAspect < 1f) {
                 ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
             } else {
                 ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
             }
         }
         DisposableEffect(activity) {
-            onDispose { activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
+            onDispose {
+                activity?.requestedOrientation = if (television) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
         }
         val videoPlaybackSize by viewModel.videoPlaybackSize.collectAsState()
         val buffering by viewModel.videoBuffering.collectAsState()
@@ -231,7 +239,7 @@ fun MainScreen(
             context.packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
         }
         var showSpeedSelector by remember { mutableStateOf(false) }
-        BackHandler { viewModel.stopVideoPlayback() }
+
 
         val rootFocusRequester = remember { FocusRequester() }
         val playPauseFocusRequester = remember { FocusRequester() }
@@ -415,7 +423,7 @@ fun MainScreen(
                         videoUrl = videoLocation,
                         downloadProgress = downloadProgress,
                         showDownload = durationMs > 0,
-                        onBackClick = { viewModel.stopVideoPlayback() },
+                        onBackClick = onExit,
                         onSpeedClick = {
                             overlayVisible = false
                             showSpeedSelector = true
@@ -437,7 +445,9 @@ fun MainScreen(
                         onRotateClick = {
                             activity?.let {
                                 it.requestedOrientation =
-                                    if (it.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+                                    if (television) {
+                                        ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                                    } else if (it.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
                                         ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
                                     } else {
                                         ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
@@ -508,43 +518,43 @@ fun MainScreen(
     }
 
     if (fullscreen) {
-        BackHandler { fullscreen = false }
+
         FullscreenVideo(
             viewModel = viewModel,
             video = video,
-            onExitFullscreen = { fullscreen = false },
+            onExitFullscreen = onExit,
             onPip = onPip
         )
     } else {
-        Scaffold(
-            bottomBar = {
-                Column {
-                    AudioMiniController(
-                        viewModel,
-                        visible = audioOnly && connections > 0 && tab != Tab.OVERVIEW,
-                        onClick = { tab = Tab.OVERVIEW }
-                    )
-                    NavigationBar {
-                        Tab.entries.forEach { t ->
-                            NavigationBarItem(
-                                selected = tab == t,
-                                onClick = { tab = t },
-                                icon = { Icon(t.icon, null) },
-                                label = { Text(stringResource(t.labelRes)) },
-                                modifier = Modifier.dpadFocus()
-                            )
-                        }
+        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            if (tab != Tab.OVERVIEW) {
+                Row(
+                    Modifier.fillMaxWidth().safeDrawingPadding().padding(horizontal = 32.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilledTonalButton(onClick = { tab = Tab.OVERVIEW }, modifier = Modifier.heightIn(min = 48.dp).dpadFocus()) {
+                        Icon(Icons.Default.Home, null, Modifier.size(22.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Text("返回投屏首页", style = MaterialTheme.typography.titleMedium)
                     }
+                    Spacer(Modifier.width(24.dp))
+                    Text("后台持续接收", style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-        ) { padding ->
-            Box(modifier = Modifier.padding(padding).consumeWindowInsets(padding)) {
+            Box(Modifier.weight(1f).fillMaxWidth()) {
                 TabContent(
                     tab, viewModel, video,
                     onFullscreen = { fullscreen = true }, onPip = onPip, onLocalNetwork = onLocalNetwork,
-                    showAudioMode = audioOnly
+                    showAudioMode = audioOnly, onOpenSettings = { tab = Tab.SETTINGS },
+                    onOpenLogs = { tab = Tab.LOGS }
                 )
             }
+            AudioMiniController(
+                viewModel,
+                visible = audioOnly && connections > 0 && tab != Tab.OVERVIEW,
+                onClick = { tab = Tab.OVERVIEW }
+            )
         }
     }
 
@@ -577,12 +587,15 @@ private fun TabContent(
     onFullscreen: () -> Unit,
     onPip: () -> Unit,
     onLocalNetwork: () -> Unit,
-    showAudioMode: Boolean
+    showAudioMode: Boolean,
+    onOpenSettings: () -> Unit,
+    onOpenLogs: () -> Unit
 ) {
     when (tab) {
         Tab.OVERVIEW -> OverviewContent(
             viewModel, video,
-            onFullscreen = onFullscreen, onPip = onPip, onLocalNetwork = onLocalNetwork, showAudioMode = showAudioMode
+            onFullscreen = onFullscreen, onPip = onPip, onLocalNetwork = onLocalNetwork, showAudioMode = showAudioMode,
+            onOpenSettings = onOpenSettings, onOpenLogs = onOpenLogs
         )
         Tab.LOGS -> LogsScreen(viewModel)
         Tab.SETTINGS -> SettingsScreen(viewModel)
@@ -596,7 +609,9 @@ private fun OverviewContent(
     onFullscreen: () -> Unit,
     onPip: () -> Unit,
     onLocalNetwork: () -> Unit,
-    showAudioMode: Boolean = false
+    showAudioMode: Boolean = false,
+    onOpenSettings: () -> Unit,
+    onOpenLogs: () -> Unit
 ) {
     val state by viewModel.serverState.collectAsState()
     val localNetwork by viewModel.localNetwork.collectAsState()
@@ -605,14 +620,53 @@ private fun OverviewContent(
     val serverName by viewModel.pref(Prefs.SERVER_NAME).collectAsState()
     val videoResolution by viewModel.videoResolution.collectAsState()
     val idlePreview by viewModel.pref(Prefs.IDLE_PREVIEW).collectAsState()
+    val selectedResolution by viewModel.pref(Prefs.RESOLUTION).collectAsState()
+    val selectedFps by viewModel.pref(Prefs.MAX_FPS).collectAsState()
+    val airPlayStatus by viewModel.airPlayDiscoveryStatus.collectAsState()
+    val dlnaStatus by viewModel.dlnaStatus.collectAsState()
+    val networkAddresses by viewModel.networkAddresses.collectAsState()
+    val playbackError by viewModel.playbackError.collectAsState()
     val mirroringActive by viewModel.mirroringActive.collectAsState()
     val videoPlaybackActive by viewModel.videoPlaybackActive.collectAsState()
     val debugEnabled by viewModel.pref(Prefs.DEBUG_ENABLED).collectAsState()
     val debugInfo by viewModel.debugInfo.collectAsState()
     val tv = isTv()
     val startFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) {
-        if (tv) startFocus.requestFocus()
+    LaunchedEffect(tv, state, connections == 0) {
+        if (tv) startFocus.requestFocusUntilLanded()
+    }
+
+    if (state != ServerState.RUNNING || connections == 0) {
+        val status = if (grant) "需要局域网访问权限" else when (state) {
+            ServerState.STOPPED -> "正在准备接收"
+            ServerState.RUNNING -> "等待手机投屏"
+            ServerState.ERROR -> "接收未开启，请点“重新开启”"
+        }
+        val settings = localNetwork == LocalNetworkAccess.SETTINGS
+        CastWelcome(
+            serverName = serverName,
+            status = status,
+            ready = state == ServerState.RUNNING && !grant,
+            resolution = selectedResolution,
+            fps = selectedFps,
+            airPlayStatus = airPlayStatus,
+            dlnaStatus = dlnaStatus,
+            networkAddresses = networkAddresses,
+            playbackError = playbackError,
+            onRefreshDiscovery = viewModel::refreshDiscovery,
+            actionLabel = when {
+                grant -> if (settings) "打开权限设置" else "允许局域网访问"
+                else -> "重新开启"
+            },
+            onAction = when {
+                grant -> onLocalNetwork
+                else -> viewModel::startServer
+            },
+            onOpenSettings = onOpenSettings,
+            onOpenLogs = onOpenLogs,
+            actionFocus = startFocus
+        )
+        return
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -749,7 +803,7 @@ private fun OverviewContent(
                             if (settings) R.string.btn_open_settings else R.string.btn_allow,
                             onLocalNetwork
                         )
-                        state == ServerState.RUNNING -> Triple(Icons.Default.Stop, R.string.btn_stop, viewModel::stopServer)
+                        state == ServerState.RUNNING -> Triple(Icons.Default.Settings, R.string.tab_settings, onOpenSettings)
                         else -> Triple(Icons.Default.PlayArrow, R.string.btn_start, viewModel::startServer)
                     }
                     FilledTonalButton(

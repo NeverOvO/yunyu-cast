@@ -22,6 +22,11 @@ class VideoRenderer(ctx: Context) {
     private var videoWidth = 0
     private var videoHeight = 0
     private var firstFrameQueued = false
+    private var sessionRunning = false
+    private val failedDecoders = mutableSetOf<String>()
+    private val runtimeFailures = mutableMapOf<String, Int>()
+    private val acceptedConfiguration = mutableMapOf<String, Int>()
+    private var decoderUnavailable = false
 
     // stats
     @Volatile var fps = 0; private set
@@ -43,14 +48,16 @@ class VideoRenderer(ctx: Context) {
     private var _frameIntervalIdx = 0
     private var _frameIntervalCount = 0
     private var _lastOutputFrameNs = 0L
-    // anchors that map decoder PTS (us) to System.nanoTime() for scheduled rendering
-    private var _ptsBaseUs = Long.MIN_VALUE
-    private var _wallBaseNs = 0L
+    private val releaseClock = FrameReleaseClock()
 
     fun setResolution(w: Int, h: Int) = synchronized(lock) {
         if (w == videoWidth && h == videoHeight) return@synchronized
         videoWidth = w
         videoHeight = h
+        failedDecoders.clear()
+        runtimeFailures.clear()
+        acceptedConfiguration.clear()
+        decoderUnavailable = false
         pipeline.setVideoSize(w, h)
         stopCodec()
     }
@@ -85,14 +92,26 @@ class VideoRenderer(ctx: Context) {
             .reduceOrNull { (w1, h1), (w2, h2) -> minOf(w1, w2) to minOf(h1, h2) } ?: (1920 to 1080)
 
     // codec per mirror session; pipeline persists across sessions
-    fun startSession() = synchronized(lock) { _resetStats() }
+    fun startSession() = synchronized(lock) {
+        stopCodec()
+        sessionRunning = true
+        failedDecoders.clear()
+        runtimeFailures.clear()
+        acceptedConfiguration.clear()
+        decoderUnavailable = false
+        _resetStats()
+    }
 
-    fun stopSession() = synchronized(lock) { stopCodec() }
+    fun stopSession() = synchronized(lock) {
+        sessionRunning = false
+        stopCodec()
+    }
 
     private fun _resetStats() {
         fps = 0; bitrateBps = 0; frameCount = 0; codecName = ""
         droppedFrames = 0; framePacingJitterUs = 0
         _framesThisSec = 0; _bytesThisSec = 0
+        _lastStatReset = System.currentTimeMillis()
     }
 
     private fun _updateStats(size: Int) {
@@ -122,8 +141,11 @@ class VideoRenderer(ctx: Context) {
 
     fun feedFrame(data: ByteArray, ntpTimeNs: Long, isH265: Boolean) {
         synchronized(lock) {
+            if (!sessionRunning || (decoderUnavailable && isH265 == currentH265)) return
+            decoderUnavailable = false
             _updateStats(data.size)
             if (videoWidth == 0 || videoHeight == 0) return
+            if (codec != null && !pipeline.isRunning) stopCodec()
 
             if (codec == null || isH265 != currentH265) {
                 // a stale reference frame decodes to corruption, so wait for a keyframe to (re)start
@@ -140,6 +162,14 @@ class VideoRenderer(ctx: Context) {
                 drainOutput()
             } catch (e: Exception) {
                 Log.w(TAG, "Codec error, resetting", e)
+                // Give a transient hardware/stream error one reconstruction at
+                // the same quality. Repeated failures use another decoder rather
+                // than entering an unbounded configure/fail loop.
+                codec?.let {
+                    val failures = (runtimeFailures[it.name] ?: 0) + 1
+                    runtimeFailures[it.name] = failures
+                    if (failures >= 2) failedDecoders.add(it.name)
+                }
                 stopCodec()
             }
         }
@@ -152,7 +182,7 @@ class VideoRenderer(ctx: Context) {
         repeat(retries) {
             val idx = c.dequeueInputBuffer(FEED_WAIT_US)
             if (idx >= 0) {
-                val buf = c.getInputBuffer(idx) ?: return
+                val buf = c.getInputBuffer(idx) ?: error("Decoder supplied no input buffer")
                 buf.clear()
                 buf.put(data)
                 c.queueInputBuffer(idx, 0, data.size, ntpTimeNs / 1000, 0)
@@ -191,27 +221,32 @@ class VideoRenderer(ctx: Context) {
         val s = pipeline.inputSurface ?: return
         currentH265 = h265
         val mime = if (h265) DecoderSelector.HEVC else DecoderSelector.AVC
-        val info = (if (h265) hevcDecoder else avcDecoder) ?: error("no decoder selected for $mime")
-
+        val preferred = if (h265) hevcDecoder else avcDecoder
         firstFrameQueued = false
-        try {
-            _startWithLadder(info, mime, s, h265)
-        } catch (e: Exception) {
-            // strict hw decoders reject configs beyond their real limits
-            val sw = selector.software(mime, videoWidth, videoHeight) ?: throw e
-            Log.w(TAG, "Hardware decoder failed, trying software fallback", e)
-            _startWithLadder(sw, mime, s, h265)
+        val candidates = (listOfNotNull(preferred) + selector.fallbacks(mime, videoWidth, videoHeight))
+            .distinctBy { it.name }.filterNot { it.name in failedDecoders }
+        for (info in candidates) {
+            try {
+                _startWithLadder(info, mime, s, h265)
+                Log.i(TAG, "Video codec started: $mime ${videoWidth}x${videoHeight} ($codecName)")
+                return
+            } catch (e: Exception) {
+                failedDecoders.add(info.name)
+                Log.w(TAG, "Decoder ${info.name} failed; trying next available decoder", e)
+            }
         }
-        Log.i(TAG, "Video codec started: $mime ${videoWidth}x${videoHeight} ($codecName)")
+        decoderUnavailable = true
+        Log.e(TAG, "No working decoder for $mime ${videoWidth}x${videoHeight}; reconnect to retry")
     }
 
     private fun _startWithLadder(info: MediaCodecInfo, mime: String, s: Surface, h265: Boolean) {
-        var tryNum = 0
+        var tryNum = acceptedConfiguration[info.name] ?: 0
         while (true) {
             val format = _format(mime, info)
             val more = selector.lowLatencyOptions(format, info, mime, tryNum)
             try {
                 _startDecoder(MediaCodec.createByCodecName(info.name), format, s, h265)
+                acceptedConfiguration[info.name] = tryNum
                 return
             } catch (e: Exception) {
                 if (!more) throw e
@@ -254,13 +289,10 @@ class VideoRenderer(ctx: Context) {
         _frameIntervalIdx = 0
         _frameIntervalCount = 0
         _lastOutputFrameNs = 0L
-        _ptsBaseUs = Long.MIN_VALUE
-        _wallBaseNs = 0L
+        releaseClock.reset()
         codec?.let {
-            try {
-                it.stop()
-                it.release()
-            } catch (_: Exception) {}
+            runCatching { it.stop() }
+            runCatching { it.release() }
         }
         codec = null
     }
@@ -274,12 +306,7 @@ class VideoRenderer(ctx: Context) {
             _recordOutputFrameTime()
             if (scheduledOutputBufferRelease) {
                 // schedule frame at VSYNC matching its NTP presentation time
-                val ptsUs = info.presentationTimeUs
-                if (_ptsBaseUs == Long.MIN_VALUE) {
-                    _ptsBaseUs = ptsUs
-                    _wallBaseNs = System.nanoTime()
-                }
-                c.releaseOutputBuffer(idx, _wallBaseNs + (ptsUs - _ptsBaseUs) * 1000L)
+                c.releaseOutputBuffer(idx, releaseClock.releaseTimeNs(info.presentationTimeUs, System.nanoTime()))
             } else {
                 c.releaseOutputBuffer(idx, true)
             }
@@ -287,6 +314,7 @@ class VideoRenderer(ctx: Context) {
     }
 
     fun release() = synchronized(lock) {
+        sessionRunning = false
         stopCodec()
         pipeline.release()
         _resetStats()

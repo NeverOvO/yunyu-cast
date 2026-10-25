@@ -1,0 +1,9 @@
+# 项目来源与修改声明
+
+云屿投屏（Yunyu Cast）是基于 jqssun/android-airplay-server 的衍生项目，起始版本为 v0.0.36，提交 a46cca0a6a1274e9e33c0e750f0f1c1eb1d881ea。上游源码、版权声明和提交历史予以保留；应用代码按根目录 LICENSE 中的 GNU GPL v3 分发。
+
+本项目于 2026-10-25 整理公开发布 0.4.1-preview.1。在上游基础上调整了中文品牌与手绘素材、电视首页与画质入口、自动接收和遥控返回行为，增加 DLNA 接收与设备发现处理，并修改了原生生命周期、播放恢复和日志处理。版本差异见 CHANGELOG.md。
+
+第三方组件继续适用各自的版权和许可，见 THIRD_PARTY_NOTICES.md 与 LICENSES/；未通过本声明改变上游许可。手绘图标和横幅由 imagegen 生成，原图及提示词随仓库提供。
+
+本项目与 Apple、Sony 无隶属关系，不是其官方或认证产品。AirPlay 等名称仅用于描述兼容功能。
