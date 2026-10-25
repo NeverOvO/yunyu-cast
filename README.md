@@ -6,7 +6,7 @@
 
 当前版本为 **0.4.1-preview.1 家庭试用版**，支持 Android 8.0 及以上的 ARM32 / ARM64 设备。项目围绕国行索尼 85X90 系列使用场景开发，其他电视的兼容性以实际运行结果为准。
 
-[下载 0.4.1 APK](https://github.com/NeverOvO/yunyu-cast/releases/download/v0.4.1-preview.1/云屿投屏-0.4.1-preview.1.apk) · [发布说明与附件](https://github.com/NeverOvO/yunyu-cast/releases/tag/v0.4.1-preview.1) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/NeverOvO/yunyu-cast/issues)
+[下载 0.4.1 APK](https://github.com/NeverOvO/yunyu-cast/releases/download/v0.4.1-preview.1/yunyu-cast-0.4.1-preview.1.apk) · [发布说明与附件](https://github.com/NeverOvO/yunyu-cast/releases/tag/v0.4.1-preview.1) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/NeverOvO/yunyu-cast/issues)
 
 ## 安装和投屏
 
