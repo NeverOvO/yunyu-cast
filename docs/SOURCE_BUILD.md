@@ -5,7 +5,7 @@
 ```sh
 git clone --recurse-submodules https://github.com/NeverOvO/yunyu-cast.git
 cd yunyu-cast
-git checkout v0.5.4-preview.1
+git checkout v0.6.0-preview.1
 git submodule update --init --recursive
 ```
 
@@ -13,13 +13,13 @@ git submodule update --init --recursive
 
 ## 使用 Release 的完整源码包
 
-下载 `yunyu-cast-0.5.4-preview.1-source.tar.gz` 后解压，在解压目录运行：
+下载 `yunyu-cast-0.6.0-preview.1-source.tar.gz` 后解压，在解压目录运行：
 
 ```sh
 sh scripts/prepare-source-archive.sh
 ```
 
-该脚本仅为 UxPlay 建立本地 Git 索引基线，供现有补丁任务恢复源文件；不下载代码、不运行构建，也不创建提交。完整包内的 UxPlay 为固定提交的原始源码，Gradle 随后应用仓库的 0001 至 0012 补丁。GitHub 自动生成的 Source code ZIP / TAR 不含子模块，不能替代完整包。
+该脚本仅为 UxPlay 建立本地 Git 索引基线，供现有补丁任务恢复源文件；不下载代码、不运行构建，也不创建提交。完整包内的 UxPlay 为固定提交的原始源码，Gradle 随后应用仓库的 0001 至 0013 补丁。GitHub 自动生成的 Source code ZIP / TAR 不含子模块，不能替代完整包。
 
 ## 环境与命令
 
@@ -41,6 +41,8 @@ sh scripts/prepare-source-archive.sh
 
 ## 发布与构建范围
 
-0.5.4 已完成 Release 构建及原发布证书签名，本次没有运行额外测试、Lint、截图、模拟器或电视实测。源码包未进行独立构建，不宣称与签名 APK 逐字节可复现。
+0.6.0 已完成 ARM32 / ARM64 Release 构建与原发布证书签名；APK 的 v2 / v3 签名验证通过，证书 SHA-256 与 0.5.4 一致。43 项 JVM 回归测试、17 组原生检查通过，完整 lintRelease 为 0 个错误、70 个警告和 1 个提示。Android 35 模拟器已检查大字号、遥控和权限流程。逐项结果、警告说明及范围见[代码审计记录](audit-20261027.md)。
+
+独立模拟器不等同于索尼电视或真实 AirPlay / DLNA 投屏环境。源码包未进行独立构建，不宣称与发布 APK 逐字节可复现。实际分发状态及附件以对应 GitHub Release 为准。
 
 仓库 Actions 只提供手动触发的未签名 APK 构建，不读取发布私钥，不自动创建 Release。预览版的下载地址使用明确版本标签，避免将预览包误当作稳定版。

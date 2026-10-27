@@ -313,7 +313,9 @@ class DlnaRenderer(
                             if(it != "${DlnaDescriptions.services[service]}#${command.action}") throw DlnaActionException(401, "Invalid Action")
                         }
                         val answer = synchronized(commandLock) {
-                            if(!rt.active.get()) throw DlnaActionException(501, "Action Failed")
+                            // A request may expire while waiting behind another player's main-looper call.
+                            // Do not let its stale Play/Stop run after the phone has already timed out.
+                            if(!rt.active.get() || socket.isClosed) throw DlnaActionException(501, "Action Failed")
                             DlnaSoap.execute(service, command, controller)
                         }
                         response(output, 200, "OK", answer)

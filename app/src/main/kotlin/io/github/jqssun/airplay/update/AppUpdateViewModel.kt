@@ -257,10 +257,15 @@ class AppUpdateViewModel @Inject constructor(private val app: Application) : And
         val id = prefs.getLong(DOWNLOAD_ID, -1)
         if (id < 0) return@runCatching null
         val obj = JSONObject(prefs.getString(RELEASE, null) ?: return@runCatching null)
+        val digest = when (val saved = obj.opt("sha256")) {
+            null, JSONObject.NULL -> null
+            is String -> saved.takeIf { it.isNotEmpty() }
+            else -> return@runCatching null
+        }
         val release = UpdateRelease(obj.getString("tag"), obj.getString("version"), obj.getString("name"),
             obj.getString("notes"), obj.getLong("assetId"), obj.getString("assetName"), obj.getString("url"),
-            obj.getLong("size"), obj.optString("sha256").takeIf { it.matches(Regex("[0-9a-f]{64}")) })
-        if (release.assetId <= 0 || release.sizeBytes !in 1..GitHubReleaseClient.MAX_APK_BYTES) null else id to release
+            obj.getLong("size"), digest)
+        if (UpdateReleasePolicy.accepts(release)) id to release else null
     }.getOrNull()
 
     private fun encode(release: UpdateRelease): String = JSONObject().apply {

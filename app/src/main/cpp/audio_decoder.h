@@ -28,6 +28,7 @@ extern "C" {
 }
 
 #include "audio_time.h"
+#include "latency_probe.h"
 #include "log_sink.h"
 #include "timeline_buffer.h"
 
@@ -82,51 +83,6 @@ private:
     int64_t mN = 0, mSumNs = 0, mMinNs = 0, mMaxNs = 0;  // producer-thread accumulators
     std::atomic<int32_t> mMeanUs{0}, mMaxUs{0};
     std::atomic<size_t> mHeld{0};
-};
-
-// https://stackoverflow.com/a/44095383
-/*
- * SPSC queue to measure AMediaCodec decode latency: MediaCodec can't carry side data
- * across decode, so track queue times ourselves
- */
-struct LatencyProbe {
-    struct Entry { int64_t ptsUs; int64_t queueNs; };
-    static constexpr uint64_t CAP = 64;
-    Entry mBuf[CAP] = {};
-    std::atomic<uint64_t> mWrite{0};
-    std::atomic<uint64_t> mRead{0};
-
-    // call before feeding frame into MediaCodec
-    void record(int64_t ptsUs, int64_t queueNs) {
-        const uint64_t w = mWrite.load(std::memory_order_relaxed);
-        mBuf[w % CAP] = {ptsUs, queueNs};
-        mWrite.store(w + 1, std::memory_order_release);
-    }
-
-    // call after frame comes back; latency ns for ptsUs, or -1 if not recorded
-    int64_t match(int64_t ptsUs, int64_t nowNs) {
-        uint64_t r = mRead.load(std::memory_order_relaxed);
-        const uint64_t w = mWrite.load(std::memory_order_acquire);
-        for (; r < w; r++) {
-            if (mBuf[r % CAP].ptsUs == ptsUs) {
-                const int64_t lat = nowNs - mBuf[r % CAP].queueNs;
-                mRead.store(r + 1, std::memory_order_release);
-                return lat;
-            }
-        }
-        return -1;
-    }
-
-    size_t inFlight() const {
-        return (size_t)(mWrite.load(std::memory_order_relaxed) -
-                        mRead.load(std::memory_order_relaxed));
-    }
-
-    // Only while both feeding and draining the codec are stopped.
-    void reset() {
-        mWrite.store(0, std::memory_order_relaxed);
-        mRead.store(0, std::memory_order_relaxed);
-    }
 };
 
 // decodes one encoded airplay audio packet and pushes PCM onto the timeline

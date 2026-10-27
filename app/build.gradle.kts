@@ -33,8 +33,8 @@ android {
         applicationId = "com.yunyulai.tvcast"
         minSdk = 26
         targetSdk = 37
-        versionCode = 10
-        versionName = "0.5.4-preview.1"
+        versionCode = 11
+        versionName = "0.6.0-preview.1"
 
         externalNativeBuild {
             cmake {

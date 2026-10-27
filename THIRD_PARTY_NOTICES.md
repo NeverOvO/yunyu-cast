@@ -14,12 +14,12 @@
 | OpenSSL-CMake | [4edd36a8dab5f85a8f92650b5bdf6e0cab13aab8](https://github.com/viaduck/openssl-cmake/tree/4edd36a8dab5f85a8f92650b5bdf6e0cab13aab8) | [MIT](LICENSES/openssl-cmake-MIT.txt) |
 | OpenSSL | 3.4.4；构建脚本下载 [固定版本原始源码包](https://mirror.viaduck.org/openssl/openssl-3.4.4.tar.gz) | [Apache 2.0](LICENSES/OpenSSL-3.4.4-Apache-2.0.txt)、[作者](LICENSES/OpenSSL-3.4.4-AUTHORS.md) |
 
-FFmpeg 当前构建仅启用静态 avcodec / avutil 与 ALAC、AAC 解码器，未启用 `--enable-gpl` 或 `--enable-nonfree`。原生构建入口为 `app/src/main/cpp/CMakeLists.txt` 与 `cmake/BuildFFmpeg.cmake`。UxPlay 修改通过 `patches/UxPlay/` 中的补丁保存。
+FFmpeg 当前构建仅启用静态 avcodec / avutil 与 ALAC、AAC 解码器，未启用 `--enable-gpl` 或 `--enable-nonfree`。原生构建入口为 `app/src/main/cpp/CMakeLists.txt` 与 `cmake/BuildFFmpeg.cmake`。UxPlay 修改通过 `patches/UxPlay/` 中的 0001 至 0013 补丁保存；0013 调整直播播放列表等待与序列处理。
 
 AndroidX / Jetpack Compose / Media3、Oboe、Dagger Hilt 等依赖通过 Gradle 获取；固定版本和坐标见 [gradle/libs.versions.toml](gradle/libs.versions.toml)，依赖源码与声明随各自公开组件提供。Kotlin 与 kotlinx.coroutines 同样保留其原有许可。本清单不改变任何第三方许可。
 
 ## 对应源码
 
-Release 的 `yunyu-cast-0.5.4-preview.1-source.tar.gz` 包含项目源码、四个固定提交的子模块源码、原生补丁、构建脚本，以及实际构建使用的 OpenSSL 3.4.4 原始源码包。GitHub 自动提供的 Source code ZIP / TAR 不含子模块内容。
+Release 的 `yunyu-cast-0.6.0-preview.1-source.tar.gz` 包含项目源码、四个固定提交的子模块源码、原生补丁、构建脚本，以及实际构建使用的 OpenSSL 3.4.4 原始源码包。GitHub 自动提供的 Source code ZIP / TAR 不含子模块内容。
 
 完整源码包构建入口见 [docs/SOURCE_BUILD.md](docs/SOURCE_BUILD.md)。源码与 APK 同时提供，签名私钥和本机配置不随发布分发。

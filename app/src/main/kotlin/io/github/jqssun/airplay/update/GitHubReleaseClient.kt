@@ -13,7 +13,6 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
-import java.net.URI
 import java.net.URL
 import java.net.UnknownHostException
 import javax.net.ssl.SSLException
@@ -124,7 +123,7 @@ class GitHubReleaseClient {
                     val id = asset.opt("id")?.toString()?.toLongOrNull() ?: continue
                     if (id <= 0 || size !in 1..MAX_APK_BYTES) continue
                     val downloadUrl = asset.text("browser_download_url")
-                    if (!validAssetUrl(downloadUrl, tag, name)) continue
+                    if (!UpdateReleasePolicy.validAssetUrl(downloadUrl, tag, name)) continue
                     val digestValue = asset.opt("digest")
                     val digest = if (digestValue == null || digestValue == JSONObject.NULL) null else {
                         val text = digestValue as? String ?: continue
@@ -160,19 +159,9 @@ class GitHubReleaseClient {
 
     private fun JSONObject.text(key: String): String = opt(key) as? String ?: ""
 
-    private fun validAssetUrl(value: String, tag: String, name: String): Boolean = try {
-        val uri = URI(value)
-        uri.scheme == "https" && uri.host.equals("github.com", ignoreCase = true) &&
-            (uri.port == -1 || uri.port == 443) && uri.rawUserInfo == null &&
-            uri.rawQuery == null && uri.rawFragment == null &&
-            uri.path == "/NeverOvO/yunyu-cast/releases/download/$tag/$name"
-    } catch (_: Exception) {
-        false
-    }
-
     companion object {
         const val RELEASES_URL = "https://api.github.com/repos/NeverOvO/yunyu-cast/releases?per_page=100"
-        const val MAX_APK_BYTES = 256L * 1024 * 1024
+        const val MAX_APK_BYTES = UpdateReleasePolicy.MAX_APK_BYTES
         private const val MAX_RESPONSE_BYTES = 4L * 1024 * 1024
         private const val REQUEST_TIMEOUT_MS = 30_000L
         private val SHA256_DIGEST = Regex("^sha256:[0-9a-fA-F]{64}$")

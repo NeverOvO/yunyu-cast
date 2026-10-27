@@ -24,6 +24,7 @@ import androidx.activity.viewModels
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
@@ -32,6 +33,9 @@ import androidx.lifecycle.repeatOnLifecycle
 import io.github.jqssun.airplay.service.AirPlayService
 import io.github.jqssun.airplay.ui.MainScreen
 import io.github.jqssun.airplay.ui.AppUpdateDialog
+import io.github.jqssun.airplay.ui.AutoLaunchPermissionDialog
+import io.github.jqssun.airplay.onboarding.AutoLaunchOnboarding
+import io.github.jqssun.airplay.onboarding.AutoLaunchStep
 import io.github.jqssun.airplay.update.AppUpdateViewModel
 import io.github.jqssun.airplay.ui.isTvDevice
 import io.github.jqssun.airplay.ui.theme.AirPlayTheme
@@ -49,8 +53,17 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
     private val updateViewModel: AppUpdateViewModel by viewModels()
-    private var installScreenOpen = false
-    private var installPermissionScreenOpen = false
+    private var installScreenOpen by mutableStateOf(false)
+    private var installPermissionScreenOpen by mutableStateOf(false)
+    private var activityResumed by mutableStateOf(false)
+    private var runtimePermissionsPending by mutableStateOf(false)
+    private var autoLaunchOnboarding by mutableStateOf(AutoLaunchOnboarding(handled = true))
+    private val onboardingPrefs by lazy { getSharedPreferences("auto_launch_onboarding", MODE_PRIVATE) }
+    private val activePlayback by lazy {
+        combine(viewModel.audioOnly, viewModel.videoPlaybackActive, viewModel.mirroringActive,
+            viewModel.videoSessionPending) { audio, video, mirror, pending -> audio || video || mirror || pending }
+            .distinctUntilChanged()
+    }
     private val installPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         installPermissionScreenOpen = false
         updateViewModel.permissionReturned(packageManager.canRequestPackageInstalls())
@@ -82,11 +95,25 @@ class MainActivity : ComponentActivity() {
 
     private val permissions = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { if (it.isNotEmpty()) _syncLocalNetwork(requested = true) }
+    ) {
+        runtimePermissionsPending = false
+        if (it.isNotEmpty()) _syncLocalNetwork(requested = true)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        autoLaunchOnboarding = AutoLaunchOnboarding.restore(
+            granted = canAutoLaunchCast(),
+            handled = onboardingPrefs.getBoolean("handled", false),
+            waitingForSettings = onboardingPrefs.getBoolean("waiting_for_settings", false),
+            savedStep = savedInstanceState?.getString("auto_launch_step")?.let { name ->
+                AutoLaunchStep.entries.firstOrNull { it.name == name }
+            },
+        )
+        persistAutoLaunchOnboarding(autoLaunchOnboarding)
+        runtimePermissionsPending = savedInstanceState?.getBoolean("runtime_permissions_pending") ?: false
 
         val missing = buildList {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !_granted(Manifest.permission.POST_NOTIFICATIONS)) {
@@ -94,7 +121,10 @@ class MainActivity : ComponentActivity() {
             }
             if (!hasLocalNetwork()) add(Manifest.permission.ACCESS_LOCAL_NETWORK)
         }
-        if (missing.isNotEmpty()) permissions.launch(missing.toTypedArray())
+        if (missing.isNotEmpty() && !runtimePermissionsPending) {
+            runtimePermissionsPending = true
+            permissions.launch(missing.toTypedArray())
+        }
 
         bindService(Intent(this, AirPlayService::class.java), connection, BIND_AUTO_CREATE)
 
@@ -110,10 +140,9 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 combine(
-                    viewModel.pref(Prefs.KEEP_SCREEN_ON), viewModel.connectionCount,
-                    viewModel.videoPlaybackActive
-                ) { keep, conns, videoActive ->
-                    keep && (conns > 0 || videoActive)
+                    viewModel.pref(Prefs.KEEP_SCREEN_ON), activePlayback, viewModel.pinCode
+                ) { keep, playing, pin ->
+                    keep && (playing || pin != null)
                 }.collect { on ->
                     if (on) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -127,7 +156,7 @@ class MainActivity : ComponentActivity() {
             lifecycleScope.launch {
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
                     combine(
-                        viewModel.serverState, viewModel.connectionCount,
+                        viewModel.serverState, activePlayback,
                         viewModel.videoPlaybackActive, viewModel.videoPlaybackAspect,
                         viewModel.videoAspect
                     ) { _, _, _, _, _ -> }.collect { setPictureInPictureParams(_pipParams()) }
@@ -137,8 +166,8 @@ class MainActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                combine(viewModel.connectionCount, viewModel.videoPlaybackActive, viewModel.mirroringActive) {
-                    connections, video, mirror -> connections == 0 && !video && !mirror
+                combine(activePlayback, viewModel.pinCode) {
+                    playing, pin -> !playing && pin == null
                 }.distinctUntilChanged().collectLatest { idle ->
                     if (idle) {
                         delay(2_500)
@@ -158,10 +187,8 @@ class MainActivity : ComponentActivity() {
         setContent {
             AirPlayTheme {
                 val updateState by updateViewModel.state.collectAsState()
-                val updateConnections by viewModel.connectionCount.collectAsState()
-                val updateVideoActive by viewModel.videoPlaybackActive.collectAsState()
-                val updateMirrorActive by viewModel.mirroringActive.collectAsState()
-                val casting = updateConnections > 0 || updateVideoActive || updateMirrorActive
+                val casting by activePlayback.collectAsState(initial = hasActivePlayback())
+                val pin by viewModel.pinCode.collectAsState()
                 MainScreen(
                     viewModel = viewModel,
                     isInPip = isInPip.value,
@@ -174,21 +201,35 @@ class MainActivity : ComponentActivity() {
                     onOpenUpdates = updateViewModel::open
                 )
                 AppUpdateDialog(
-                    state = updateState.copy(dialogVisible = updateState.dialogVisible && !casting),
+                    state = updateState.copy(dialogVisible = updateState.dialogVisible && !casting && pin == null),
                     onDismiss = updateViewModel::dismiss,
                     onCheck = updateViewModel::check,
                     onDownload = updateViewModel::download,
                     onInstall = ::requestUpdateInstall,
                     onCancelDownload = updateViewModel::cancelDownload
                 )
+                if (activityResumed && !runtimePermissionsPending && !casting && pin == null &&
+                    !isInPip.value && !updateState.dialogVisible && !installScreenOpen && !installPermissionScreenOpen) {
+                    AutoLaunchPermissionDialog(
+                        step = autoLaunchOnboarding.step,
+                        onOpenSettings = ::requestAutoLaunchPermission,
+                        onDefer = { persistAutoLaunchOnboarding(autoLaunchOnboarding.defer()) },
+                        onClose = {
+                            persistAutoLaunchOnboarding(autoLaunchOnboarding.dismiss())
+                            if (updateViewModel.shouldAutoInstall()) requestUpdateInstall()
+                        },
+                    )
+                }
             }
         }
     }
 
     private fun requestUpdateInstall() {
         if (installScreenOpen || installPermissionScreenOpen) return
+        if (runtimePermissionsPending || autoLaunchOnboarding.waitingForSettings ||
+            (autoLaunchOnboarding.step != AutoLaunchStep.NONE && !updateViewModel.state.value.dialogVisible)) return
         updateViewModel.stopAutoInstall()
-        if (viewModel.connectionCount.value > 0 || viewModel.videoPlaybackActive.value || viewModel.mirroringActive.value) {
+        if (hasActivePlayback() || viewModel.pinCode.value != null) {
             updateViewModel.installMessage("正在投屏，请先在手机上结束投屏，再点“安装更新”。")
             return
         }
@@ -266,6 +307,7 @@ class MainActivity : ComponentActivity() {
         if (viewModel.localNetwork.value == LocalNetworkAccess.SETTINGS) {
             startActivity(appSettingsIntent())
         } else {
+            runtimePermissionsPending = true
             permissions.launch(arrayOf(Manifest.permission.ACCESS_LOCAL_NETWORK))
         }
     }
@@ -276,6 +318,46 @@ class MainActivity : ComponentActivity() {
         _refreshForeground()
         _autoStart()
     }
+
+    override fun onResume() {
+        super.onResume()
+        activityResumed = true
+        val granted = canAutoLaunchCast()
+        val next = if (autoLaunchOnboarding.waitingForSettings) autoLaunchOnboarding.settingsReturned(granted)
+            else AutoLaunchOnboarding.restore(granted, autoLaunchOnboarding.handled, false, autoLaunchOnboarding.step)
+        if (next != autoLaunchOnboarding) persistAutoLaunchOnboarding(next)
+    }
+
+    override fun onPause() {
+        activityResumed = false
+        super.onPause()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("auto_launch_step", autoLaunchOnboarding.step.name)
+        outState.putBoolean("runtime_permissions_pending", runtimePermissionsPending)
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun persistAutoLaunchOnboarding(state: AutoLaunchOnboarding) {
+        autoLaunchOnboarding = state
+        onboardingPrefs.edit().putBoolean("handled", state.handled)
+            .putBoolean("waiting_for_settings", state.waitingForSettings).apply()
+    }
+
+    private fun requestAutoLaunchPermission() {
+        if (canAutoLaunchCast()) {
+            persistAutoLaunchOnboarding(autoLaunchOnboarding.settingsReturned(true))
+            return
+        }
+        persistAutoLaunchOnboarding(autoLaunchOnboarding.openSettings())
+        if (!openAutoLaunchSettings()) {
+            persistAutoLaunchOnboarding(autoLaunchOnboarding.settingsUnavailable())
+        }
+    }
+
+    private fun hasActivePlayback() = viewModel.audioOnly.value || viewModel.videoPlaybackActive.value ||
+        viewModel.mirroringActive.value || viewModel.videoSessionPending.value
 
     private fun exitToTv() {
         service?.endCurrentSession()
@@ -305,7 +387,7 @@ class MainActivity : ComponentActivity() {
     private fun _shouldAutoPip(): Boolean =
         !isTvDevice() && packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
             viewModel.serverState.value == AirPlayService.ServerState.RUNNING &&
-            viewModel.connectionCount.value > 0
+            hasActivePlayback() && autoLaunchOnboarding.step == AutoLaunchStep.NONE
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()

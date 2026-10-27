@@ -1,0 +1,96 @@
+diff --git a/lib/airplay_video.c b/lib/airplay_video.c
+--- a/lib/airplay_video.c
++++ b/lib/airplay_video.c
+@@ -28,7 +28,14 @@
+ #include "raop.h"
+ #include "airplay_video.h"
+ 
+-#define MEDIA_PLAYLIST_REFRESH_SECS 5
++#define MEDIA_PLAYLIST_REFRESH_NS 5000000000ULL
++#define MEDIA_PLAYLIST_FETCH_TIMEOUT_NS 15000000000ULL
++
++static uint64_t playlist_monotonic_time_ns(void) {
++    struct timespec now;
++    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
++    return (uint64_t) now.tv_sec * 1000000000ULL + (uint64_t) now.tv_nsec;
++}
+ 
+ typedef enum playlist_type_e {
+     NONE,
+@@ -45,9 +52,10 @@
+     bool endlist;
+     playlist_type_t playlist_type;
+     int hls_version;
+-    int media_sequence;
++    uint64_t media_sequence;
+     bool fetch_pending;
+-    time_t last_fetched;
++    uint64_t fetch_started_ns;
++    uint64_t last_fetched_ns;
+ };
+ 
+ struct airplay_video_s {
+@@ -653,7 +661,7 @@
+         if ((ptr1 = strstr(ptr, media_sequence))) {
+             char *endptr = NULL;
+             ptr1 += strlen(media_sequence);
+-            media_item->media_sequence = (int) strtol(ptr1, &endptr, 10);
++            media_item->media_sequence = strtoull(ptr1, &endptr, 10);
+             ptr1 = NULL;
+         }
+         ptr += strlen(extx);
+@@ -684,14 +692,25 @@
+         }
+     }
+     media_item_t *media_item = &media_data_store[num];
++    media_item_t parsed = {0};
++    parsed.playlist = media_playlist;
++    parse_media_playlist(&parsed);
++    /* A timed-out fetch may return after a newer retry. Do not move a live
++       playlist backwards; each newly created media store starts a fresh sequence. */
++    if (media_item->playlist && parsed.media_sequence < media_item->media_sequence) {
++        pthread_mutex_unlock(&airplay_video->media_data_store_lock);
++        return -3;
++    }
+     free(media_item->playlist);
+     media_item->playlist = media_playlist;
+     media_item->fetch_pending = false;
+     media_item->count = *count;
+     media_item->duration = *duration;
+     media_item->endlist = *endlist;
+-    media_item->last_fetched = time(NULL);
+-    parse_media_playlist(media_item);
++    media_item->last_fetched_ns = playlist_monotonic_time_ns();
++    media_item->playlist_type = parsed.playlist_type;
++    media_item->hls_version = parsed.hls_version;
++    media_item->media_sequence = parsed.media_sequence;
+     pthread_mutex_unlock(&airplay_video->media_data_store_lock);
+     return 0;
+ }
+@@ -708,16 +727,23 @@
+         if (strstr(media_data_store[i].uri, uri)) {
+             media_item_t *item = &media_data_store[media_data_store[i].num];
+             char *copy = NULL;
++            uint64_t now = playlist_monotonic_time_ns();
+             bool stale = true;
+             if (item->playlist) {
+                 *count = item->count;
+                 *duration = item->duration;
+                 copy = _raw_copy_playlist(item->playlist);
+                 stale = !item->endlist &&
+-                        time(NULL) - item->last_fetched >= MEDIA_PLAYLIST_REFRESH_SECS;
+-            }
+-            if (stale && !item->fetch_pending) {
++                        now >= item->last_fetched_ns &&
++                        now - item->last_fetched_ns >= MEDIA_PLAYLIST_REFRESH_NS;
++            }
++            /* All request state is protected by the same playlist lock. A
++               dropped FCUP response expires without depending on wall-clock time. */
++            bool fetch_expired = item->fetch_pending && now >= item->fetch_started_ns &&
++                now - item->fetch_started_ns >= MEDIA_PLAYLIST_FETCH_TIMEOUT_NS;
++            if (stale && (!item->fetch_pending || fetch_expired)) {
+                 item->fetch_pending = true;
++                item->fetch_started_ns = now;
+                 *should_fetch = true;
+                 *remote_uri = item->uri;
+             }

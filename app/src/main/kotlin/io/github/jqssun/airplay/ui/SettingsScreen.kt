@@ -1,11 +1,5 @@
 package io.github.jqssun.airplay.ui
 
-import android.content.ActivityNotFoundException
-import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.os.Build
-import android.provider.Settings
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
@@ -35,7 +29,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.github.jqssun.airplay.Prefs
 import io.github.jqssun.airplay.R
-import io.github.jqssun.airplay.appSettingsIntent
+import io.github.jqssun.airplay.canAutoLaunchCast
+import io.github.jqssun.airplay.openAutoLaunchSettings
 import io.github.jqssun.airplay.viewmodel.MainViewModel
 import androidx.compose.ui.res.stringArrayResource
 import androidx.compose.ui.res.stringResource
@@ -123,10 +118,10 @@ fun SettingsScreen(
 
         val ctx = LocalContext.current
         val lifecycleOwner = LocalLifecycleOwner.current
-        var hasOverlayPermission by remember { mutableStateOf(canAutoLaunch(ctx)) }
+        var hasOverlayPermission by remember { mutableStateOf(ctx.canAutoLaunchCast()) }
         DisposableEffect(lifecycleOwner) {
             val observer = LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_RESUME) hasOverlayPermission = canAutoLaunch(ctx)
+                if (event == Lifecycle.Event.ON_RESUME) hasOverlayPermission = ctx.canAutoLaunchCast()
             }
             lifecycleOwner.lifecycle.addObserver(observer)
             onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -134,13 +129,19 @@ fun SettingsScreen(
         ListItem(
             modifier = Modifier
                 .dpadFocus(RectangleShape)
-                .clickable(enabled = !hasOverlayPermission) { _openOverlaySettings(ctx) },
-            headlineContent = { Text("投屏时自动打开画面") },
+                .clickable(enabled = !hasOverlayPermission) {
+                    if (!ctx.openAutoLaunchSettings()) android.widget.Toast.makeText(ctx,
+                        "请在电视系统的应用设置中，允许云屿投屏显示在其他应用上层。",
+                        android.widget.Toast.LENGTH_LONG).show()
+                }.heightIn(min = 88.dp),
+            headlineContent = { Text("投屏时自动打开画面", fontSize = 22.sp, color = Color.White) },
             supportingContent = {
                 Text(if (hasOverlayPermission) "退出页面后，手机再次投屏会自动显示。"
-                     else "请在电视系统中允许显示在其他应用上层，方便下次直接投屏。")
+                     else "请在电视系统中允许显示在其他应用上层，方便下次直接投屏。",
+                    fontSize = 18.sp)
             },
-            trailingContent = { Text(if (hasOverlayPermission) "已开启" else "去开启") }
+            trailingContent = { Text(if (hasOverlayPermission) "已开启" else "去开启",
+                fontSize = 20.sp, color = MaterialTheme.colorScheme.primary) }
         )
 
         ListItem(
@@ -427,19 +428,6 @@ fun SettingsScreen(
                 onCheckedChange = { viewModel.set(Prefs.BENCHMARK_LOG, it) }
             )
         }
-    }
-}
-
-private fun canAutoLaunch(ctx: Context): Boolean =
-    Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || Settings.canDrawOverlays(ctx)
-
-// overlay settings screen may not exist on some builds
-private fun _openOverlaySettings(ctx: Context) {
-    val overlay = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${ctx.packageName}"))
-    try {
-        ctx.startActivity(overlay.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-    } catch (_: ActivityNotFoundException) {
-        ctx.startActivity(ctx.appSettingsIntent().addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 }
 

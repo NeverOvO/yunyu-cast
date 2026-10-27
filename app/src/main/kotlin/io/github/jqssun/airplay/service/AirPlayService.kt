@@ -101,7 +101,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     @Volatile private var acceptingNativeCallbacks = false
     private var destroyed = false
     private val mediaCallbackLock = Any()
-    private val nativeConnectionCount = AtomicInteger()
+    private val nativeConnections = NativeConnectionTracker()
     @Volatile private var closingAirPlayUntil = 0L
     @Volatile private var airPlayAudioActive = false
     @Volatile private var airPlayAudioUsesScreen = false
@@ -153,7 +153,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     val audioRenderer = AudioRenderer()
     private val audioManager by lazy { getSystemService(Context.AUDIO_SERVICE) as AudioManager }
     val airPlayVideoPlayer by lazy { AirPlayVideoPlayer(this) }
-    val videoDownloader by lazy { VideoDownloader(this) }
+    private val videoDownloaderDelegate = lazy { VideoDownloader(this) }
+    val videoDownloader by videoDownloaderDelegate
 
     // hls urls point at the native httpd, valid only while the session lives
     private val _videoLocation = MutableStateFlow<String?>(null)
@@ -651,6 +652,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             (_mirroringActive.value || _audioOnly.value || _videoPlaybackActive.value)
         if (dlnaOwnsPlayer) _endVideoPlayback("切换至 AirPlay")
         _resetDlnaSession()
+        _applyClientVol()
         if (!alreadyPlaying && shouldLaunchOnConnect()) launchMainActivity()
     }
 
@@ -859,7 +861,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         clearPin()
         _serverState.value = ServerState.STOPPED
         _connectionCount.value = 0
-        nativeConnectionCount.set(0)
+        nativeConnections.reset()
         _clientVol = null
         _clientVolDriveEnd()
         _restoreServerVolume()
@@ -912,7 +914,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     /** Ends only the current media session; the listeners, foreground service and discovery stay up. */
     fun endCurrentSession() {
         check(Looper.myLooper() == Looper.getMainLooper())
-        val hadAirPlay = nativeConnectionCount.get() > 0 || _mirroringActive.value ||
+        val hadAirPlay = nativeConnections.current().count > 0 || _mirroringActive.value ||
             (_videoPlaybackActive.value && !dlnaOwnsPlayer)
         synchronized(mediaCallbackLock) {
             sessionExitGeneration++
@@ -975,6 +977,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         log(message)
     }
 
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     override fun onDestroy() {
         destroyed = true
         _mainHandler.removeCallbacks(networkRefresh)
@@ -984,6 +987,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         }
         _shutdown()
         airPlayVideoPlayer.release()
+        if (videoDownloaderDelegate.isInitialized()) videoDownloader.release()
         _mainHandler.removeCallbacksAndMessages(null)
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         foregroundStarted = false
@@ -1107,6 +1111,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onClientVolume(db: Float) {
+        if (!db.isFinite()) return
         postNativeState {
             val frac = _dbToFrac(db)
             _clientVol = frac
@@ -1137,6 +1142,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     private fun _applyClientVol() {
+        if (dlnaOwnsPlayer) return
         val frac = _clientVol
         if (!_syncClientVol) {
             _setClientGain(_clientGain(frac ?: 1f))
@@ -1160,8 +1166,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     private fun _setClientGain(gain: Float) {
-        if (gain == audioRenderer.clientGain) return
-        audioRenderer.setClientGain(gain)
+        if (gain != audioRenderer.clientGain) audioRenderer.setClientGain(gain)
+        // DLNA controls this player's gain independently of the native engine.
         airPlayVideoPlayer.setClientGain(gain)
     }
 
@@ -1208,9 +1214,9 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     override fun onConnectionInit() {
         if (!acceptingNativeCallbacks) return
-        nativeConnectionCount.incrementAndGet()
+        nativeConnections.connected()
         postNativeState(allowClosing = true) {
-            _connectionCount.value++
+            _connectionCount.value = nativeConnections.current().count
             if (isClosingAirPlay()) {
                 if (nativeHandle != 0L) NativeBridge.nativeDisconnectClients(nativeHandle)
                 return@postNativeState
@@ -1221,10 +1227,13 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     override fun onConnectionDestroy() {
         if (!acceptingNativeCallbacks) return
-        nativeConnectionCount.updateAndGet { (it - 1).coerceAtLeast(0) }
+        val disconnected = nativeConnections.disconnected()
         postNativeState(allowClosing = true) {
-            _connectionCount.value = (_connectionCount.value - 1).coerceAtLeast(0)
-            if (_connectionCount.value == 0) {
+            _connectionCount.value = nativeConnections.current().count
+            synchronized(mediaCallbackLock) {
+                // A new native media start can arrive before this main-thread
+                // callback. An older disconnect must not stop the new output.
+                if (!nativeConnections.ownsFinalDisconnect(disconnected)) return@synchronized
                 airPlayAudioActive = false
                 airPlayAudioUsesScreen = false
                 airPlayMirrorRunning = false

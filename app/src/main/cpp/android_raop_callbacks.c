@@ -127,7 +127,9 @@ void android_callbacks_update_playback_info(android_callback_ctx_t *ctx, double 
     ctx->playback_duration = duration;
     ctx->playback_rate = rate;
     ctx->playback_ready = ready;
-    if (ready && !ctx->play_ready) {
+    /* A terminal/error snapshot must release a held direct-URL /play too.
+       Keep playback_ready false: this wakes the waiter without claiming success. */
+    if ((ready || duration < 0.0) && !ctx->play_ready) {
         ctx->play_ready = 1;
         pthread_cond_signal(&ctx->play_ready_cond);
     }
