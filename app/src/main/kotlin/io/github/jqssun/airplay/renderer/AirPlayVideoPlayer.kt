@@ -8,12 +8,14 @@ import android.view.Surface
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.datasource.HttpDataSource
 import java.util.concurrent.atomic.AtomicBoolean
 
 // rate is 0 while buffering; speed is the configured rate regardless of pause state
@@ -56,10 +58,11 @@ class AirPlayVideoPlayer(private val context: Context) {
     }
 
     private fun newListener(source: ExoPlayer) = object : Player.Listener {
-        override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+        override fun onPlayerError(error: PlaybackException) {
             if (released.get() || player !== source) return
-            Log.w(TAG, "playback error", error)
-            finishPlayback(error.errorCodeName)
+            val message = playbackFailure(error)
+            Log.w(TAG, "playback error: $message")
+            finishPlayback(message)
         }
         override fun onPlaybackStateChanged(state: Int) {
             if (!released.get() && player === source && state == Player.STATE_ENDED) finishPlayback()
@@ -76,6 +79,22 @@ class AirPlayVideoPlayer(private val context: Context) {
             val width = (videoSize.width * videoSize.pixelWidthHeightRatio).toInt()
             onVideoSize?.invoke(width, videoSize.height, width.toFloat() / videoSize.height)
         }
+    }
+
+    // Report useful causes without including signed media URLs, headers or response bodies.
+    private fun playbackFailure(error: PlaybackException): String {
+        val detail = generateSequence<Throwable>(error) { it.cause }.take(12).mapNotNull { cause ->
+            when (cause) {
+                is HttpDataSource.InvalidResponseCodeException -> "视频服务器返回 HTTP ${cause.responseCode}"
+                is HttpDataSource.InvalidContentTypeException -> "视频服务器返回了不支持的内容类型"
+                is java.net.UnknownHostException -> "无法解析视频服务器地址"
+                is java.net.SocketTimeoutException -> "连接视频服务器超时"
+                is java.net.ConnectException -> "无法连接视频服务器"
+                is javax.net.ssl.SSLException -> "视频服务器的 HTTPS 连接失败"
+                else -> null
+            }
+        }.firstOrNull()
+        return if (detail == null) error.errorCodeName else "${error.errorCodeName}（$detail）"
     }
 
     fun play(location: String, startPositionSeconds: Float) = postCommand {

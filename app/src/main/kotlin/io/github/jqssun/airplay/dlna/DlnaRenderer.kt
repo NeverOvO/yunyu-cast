@@ -78,6 +78,8 @@ class DlnaRenderer(
     }
     @Volatile private var runtime: Runtime? = null
     private val commandLock = Any()
+    private val diagnosticLock = Any()
+    private val nextDiagnosticAt = mutableMapOf<String, Long>()
     private val targets get() = listOf("upnp:rootdevice", uuid, DlnaDescriptions.DEVICE) + DlnaDescriptions.services.values
 
     /** Invoke from IO. State callbacks may arrive on network workers. */
@@ -261,11 +263,16 @@ class DlnaRenderer(
     private fun handle(rt: Runtime, socket: Socket) {
         val input = BufferedInputStream(socket.getInputStream())
         val output = socket.getOutputStream()
+        var requestMethod = "未知方法"
+        var controlService = "未知服务"
+        var controlAction = "未解析动作"
         try {
             val first = readLine(input, 8192).split(' ')
             if(first.size != 3 || !first[2].startsWith("HTTP/1.")) throw HttpError(400, "Bad Request")
             val method = first[0].uppercase(Locale.US)
             val path = first[1].substringBefore('?')
+            requestMethod = method.takeIf { it in setOf("GET", "HEAD", "POST", "SUBSCRIBE", "UNSUBSCRIBE") } ?: "未知方法"
+            controlService = path.split('/').getOrNull(1)?.takeIf { it in DlnaDescriptions.services } ?: "未知服务"
             val headers = linkedMapOf<String, String>()
             var bytes = 0
             while(true) {
@@ -289,12 +296,19 @@ class DlnaRenderer(
                         else -> throw HttpError(404, "Not Found")
                     }
                     response(output, 200, "OK", body, head = method == "HEAD")
+                    if (method == "GET" && (path == "/device.xml" || path == "/description.xml")) {
+                        diagnostic("device-description", "DLNA 设备描述已读取", 60_000L)
+                    }
                 }
                 "POST" -> {
                     if(service !in DlnaDescriptions.services || path != "/$service/control") throw HttpError(404, "Not Found")
                     val body = readBody(input, headers).toString(Charsets.UTF_8)
                     try {
                         val command = DlnaSoap.parse(body)
+                        controlAction = command.action.takeIf { it in DIAGNOSTIC_ACTIONS } ?: "未知动作"
+                        if (command.action in IMPORTANT_CONTROL_ACTIONS) {
+                            diagnostic("receive:$controlAction", "DLNA 收到控制：$controlService/$controlAction")
+                        }
                         headers["soapaction"]?.trim('"')?.let {
                             if(it != "${DlnaDescriptions.services[service]}#${command.action}") throw DlnaActionException(401, "Invalid Action")
                         }
@@ -303,9 +317,15 @@ class DlnaRenderer(
                             DlnaSoap.execute(service, command, controller)
                         }
                         response(output, 200, "OK", answer)
-                    } catch(e: DlnaActionException) { response(output, 500, "Internal Server Error", DlnaSoap.fault(e.code,e.message)) }
+                        if (service == "ConnectionManager" && command.action == "GetProtocolInfo") {
+                            diagnostic("protocol-info", "DLNA 媒体能力已查询", 60_000L)
+                        }
+                    } catch(e: DlnaActionException) {
+                        diagnostic("error", "DLNA 控制被拒绝：$controlService/$controlAction，UPnP ${e.code}，${controlFaultReason(e.code)}")
+                        response(output, 500, "Internal Server Error", DlnaSoap.fault(e.code,e.message))
+                    }
                     catch(e: Exception) {
-                        log("DLNA 播放控制失败：${e.message}")
+                        diagnostic("error", "DLNA 控制失败：$controlService/$controlAction，UPnP 501，播放器暂时无法执行")
                         response(output, 500, "Internal Server Error", DlnaSoap.fault(501,"Action Failed"))
                     }
                 }
@@ -323,7 +343,39 @@ class DlnaRenderer(
                 }
                 else -> throw HttpError(405, "Method Not Allowed")
             }
-        } catch(e: HttpError) { response(output, e.code, e.reason, "") }
+        } catch(e: HttpError) {
+            diagnostic("error", "DLNA HTTP 请求被拒绝：$requestMethod $controlService/$controlAction，HTTP ${e.code}")
+            response(output, e.code, e.reason, "")
+        } catch (e: Exception) {
+            if (requestMethod == "POST") {
+                diagnostic("error", "DLNA 控制请求未完成：$controlService/$controlAction，连接中断或读取失败")
+            }
+            throw e
+        }
+    }
+
+    // Fixed keys and allowlisted labels keep diagnostics bounded and exclude URLs, metadata and headers.
+    private fun diagnostic(key: String, message: String, intervalMs: Long = 1000L) {
+        val now = SystemClock.elapsedRealtime()
+        val emit = synchronized(diagnosticLock) {
+            if (now < (nextDiagnosticAt[key] ?: 0L)) false
+            else { nextDiagnosticAt[key] = now + intervalMs; true }
+        }
+        if (emit) log(message)
+    }
+
+    private fun controlFaultReason(code: Int): String = when (code) {
+        401 -> "不支持的控制动作"
+        402 -> "参数或 XML 格式无效"
+        501 -> "播放器暂时无法执行"
+        701 -> "当前播放状态不允许该动作"
+        710 -> "不支持的跳转方式"
+        711 -> "跳转位置无效"
+        714 -> "媒体地址类型不支持"
+        716 -> "媒体地址无效"
+        717 -> "不支持的播放速度"
+        718 -> "播放实例无效"
+        else -> "控制请求被拒绝"
     }
 
     private fun subscribe(rt: Runtime, socket: Socket, output: OutputStream, service: String, headers: Map<String,String>) {
@@ -475,6 +527,13 @@ class DlnaRenderer(
         output.write(h.toByteArray(Charsets.UTF_8)); if(!head) output.write(data); output.flush()
     }
     companion object {
+        private val IMPORTANT_CONTROL_ACTIONS = setOf("SetAVTransportURI", "Play", "Pause", "Stop")
+        private val DIAGNOSTIC_ACTIONS = IMPORTANT_CONTROL_ACTIONS + setOf(
+            "Seek", "GetTransportInfo", "GetPositionInfo", "GetMediaInfo", "GetDeviceCapabilities",
+            "GetTransportSettings", "GetCurrentTransportActions", "SetPlayMode", "GetVolume", "SetVolume",
+            "GetMute", "SetMute", "ListPresets", "SelectPreset", "GetProtocolInfo", "GetCurrentConnectionIDs",
+            "GetCurrentConnectionInfo",
+        )
         private const val SERVER = "Android UPnP/1.0 YunyuCast/0.2"
         private const val MAX_BODY = 1024*1024
         private val GROUP: InetAddress = InetAddress.getByName("239.255.255.250")

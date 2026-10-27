@@ -103,6 +103,9 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     private val mediaCallbackLock = Any()
     private val nativeConnectionCount = AtomicInteger()
     @Volatile private var closingAirPlayUntil = 0L
+    @Volatile private var airPlayAudioActive = false
+    @Volatile private var airPlayAudioUsesScreen = false
+    @Volatile private var airPlayMirrorRunning = false
 
     private fun isClosingAirPlay(): Boolean = SystemClock.elapsedRealtime() < closingAirPlayUntil
 
@@ -137,7 +140,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         override fun onLinkPropertiesChanged(network: Network, props: LinkProperties) = schedule()
     }
 
-    // DLNA owns the shared video player only after Play, never while AirPlay is connected.
+    // DLNA owns the shared video player after Play; discovery TCP connections are not media sessions.
     private var dlnaUri = ""
     private var dlnaMetadata = ""
     private var dlnaState = "NO_MEDIA_PRESENT"
@@ -384,7 +387,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         }
         airPlayVideoPlayer.onTitle = { if (!it.isNullOrBlank()) _videoTitle.value = it }
         airPlayVideoPlayer.onError = { message ->
-            _playbackError.value = "影片播放失败：$message。片源可能需要登录授权，或格式不受电视支持。"
+            _playbackError.value = "影片播放失败：$message。请重新投屏；仍失败可查看连接帮助中的日志。"
             if (dlnaOwnsPlayer) dlnaTransportStatus = "ERROR_OCCURRED"
             log(_playbackError.value)
         }
@@ -636,7 +639,19 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     private fun _ensureDlnaAvailable() {
         check(!isClosingAirPlay()) { "正在结束上一段投屏，请稍后重新选择电视" }
         check(_serverState.value == ServerState.RUNNING) { "接收服务已停止" }
-        check(_connectionCount.value == 0 && !_mirroringActive.value) { "AirPlay 正在使用，请先停止屏幕镜像" }
+        check(!airPlayAudioActive && !airPlayMirrorRunning && !_mirroringActive.value &&
+            !(_videoPlaybackActive.value && !dlnaOwnsPlayer)) {
+            "AirPlay 正在播放，请先在手机上停止当前 AirPlay 投屏"
+        }
+    }
+
+    // Call only for a real media start, never for an HTTP probe or playback-info query.
+    private fun _claimAirPlayPlayback() {
+        val alreadyPlaying = !dlnaOwnsPlayer &&
+            (_mirroringActive.value || _audioOnly.value || _videoPlaybackActive.value)
+        if (dlnaOwnsPlayer) _endVideoPlayback("切换至 AirPlay")
+        _resetDlnaSession()
+        if (!alreadyPlaying && shouldLaunchOnConnect()) launchMainActivity()
     }
 
     private fun _resetDlnaSession() {
@@ -806,6 +821,9 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         sessionExitGeneration++
         synchronized(mediaCallbackLock) { /* Native teardown must not race renderer work. */ }
         closingAirPlayUntil = 0L
+        airPlayAudioActive = false
+        airPlayAudioUsesScreen = false
+        airPlayMirrorRunning = false
         _stopDlna()
         _airPlayDiscoveryStatus.value = "未启动"
         _resetDlnaSession()
@@ -899,6 +917,9 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         synchronized(mediaCallbackLock) {
             sessionExitGeneration++
             closingAirPlayUntil = if (hadAirPlay) SystemClock.elapsedRealtime() + 2500L else 0L
+            airPlayAudioActive = false
+            airPlayAudioUsesScreen = false
+            airPlayMirrorRunning = false
             audioRenderer.stop()
             videoRenderer.stopSession()
         }
@@ -1011,7 +1032,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     override fun onVideoPlay(location: String, startPositionSeconds: Float) {
         postNativeState {
-            _resetDlnaSession()
+            _claimAirPlayPlayback()
             _beginVideoPlayback(location, startPositionSeconds)
             log("AirPlay 视频开始播放")
         }
@@ -1052,10 +1073,14 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     override fun onAudioFormat(ct: Int, spf: Int, usingScreen: Boolean) {
         synchronized(mediaCallbackLock) {
             if (!acceptingNativeCallbacks || isClosingAirPlay()) return
+            airPlayAudioActive = true
+            airPlayAudioUsesScreen = usingScreen
             // The native RTP worker may decode immediately after this callback returns.
             audioRenderer.start()
             audioRenderer.setFormat(ct, spf)
             postNativeState {
+                if (!airPlayAudioActive || airPlayAudioUsesScreen != usingScreen) return@postNativeState
+                _claimAirPlayPlayback()
                 clearPin()
                 if (!usingScreen) _setPlaying(true)
                 if (!usingScreen && !_audioOnly.value) _setAudioOnly(true)
@@ -1185,16 +1210,12 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         if (!acceptingNativeCallbacks) return
         nativeConnectionCount.incrementAndGet()
         postNativeState(allowClosing = true) {
-            val firstConnection = _connectionCount.value == 0
             _connectionCount.value++
             if (isClosingAirPlay()) {
                 if (nativeHandle != 0L) NativeBridge.nativeDisconnectClients(nativeHandle)
                 return@postNativeState
             }
-            if (dlnaOwnsPlayer) _endVideoPlayback("切换至 AirPlay")
-            _resetDlnaSession()
             log("Sender connected (${_connectionCount.value})")
-            if (firstConnection && shouldLaunchOnConnect()) launchMainActivity()
         }
     }
 
@@ -1204,6 +1225,9 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         postNativeState(allowClosing = true) {
             _connectionCount.value = (_connectionCount.value - 1).coerceAtLeast(0)
             if (_connectionCount.value == 0) {
+                airPlayAudioActive = false
+                airPlayAudioUsesScreen = false
+                airPlayMirrorRunning = false
                 // Teardown may complete after DLNA has already started another film.
                 // Only clear AirPlay state; never deactivate that new player's media session.
                 if (!dlnaOwnsPlayer) _endVideoPlayback("AirPlay Video stopped (disconnect)")
@@ -1241,6 +1265,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             _lastPin = pin
             pinCallback?.invoke(pin)
             _updateMediaNotification()
+            if (shouldLaunchOnConnect()) launchMainActivity()
         }
     }
 
@@ -1291,7 +1316,18 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onAudioTeardown() {
-        postNativeState { _setPlaying(false) }
+        synchronized(mediaCallbackLock) {
+            if (!acceptingNativeCallbacks || isClosingAirPlay()) return
+            airPlayAudioActive = false
+            airPlayAudioUsesScreen = false
+            postNativeState {
+                if (airPlayAudioActive) return@postNativeState
+                if (!dlnaOwnsPlayer) {
+                    _setPlaying(false)
+                    if (!_videoPlaybackActive.value) _setAudioOnly(false)
+                }
+            }
+        }
     }
 
     override fun onDacpId(dacpId: String, activeRemote: String) {
@@ -1304,11 +1340,15 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     override fun onMirrorRunning(running: Boolean) {
         synchronized(mediaCallbackLock) {
             if (!acceptingNativeCallbacks || isClosingAirPlay()) return
+            airPlayMirrorRunning = running
             // Must precede the first frame on this same native worker.
             if (running) videoRenderer.startSession() else videoRenderer.stopSession()
             postNativeState {
-                if (!running) _mirroringActive.value = false
-                _setAudioOnly(!running && _connectionCount.value > 0)
+                if (airPlayMirrorRunning != running) return@postNativeState
+                if (running) _claimAirPlayPlayback() else _mirroringActive.value = false
+                if (!dlnaOwnsPlayer) {
+                    _setAudioOnly(!running && airPlayAudioActive && !airPlayAudioUsesScreen)
+                }
             }
         }
     }

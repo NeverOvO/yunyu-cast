@@ -5,7 +5,7 @@
 ```sh
 git clone --recurse-submodules https://github.com/NeverOvO/yunyu-cast.git
 cd yunyu-cast
-git checkout v0.5.3-preview.1
+git checkout v0.5.4-preview.1
 git submodule update --init --recursive
 ```
 
@@ -13,7 +13,7 @@ git submodule update --init --recursive
 
 ## 使用 Release 的完整源码包
 
-下载 `yunyu-cast-0.5.3-preview.1-source.tar.gz` 后解压，在解压目录运行：
+下载 `yunyu-cast-0.5.4-preview.1-source.tar.gz` 后解压，在解压目录运行：
 
 ```sh
 sh scripts/prepare-source-archive.sh
@@ -41,6 +41,6 @@ sh scripts/prepare-source-archive.sh
 
 ## 发布与构建范围
 
-0.5.3 已完成 Release 构建及原发布证书签名，本次没有运行额外测试、Lint、截图、模拟器或电视实测。源码包未进行独立构建，不宣称与签名 APK 逐字节可复现。
+0.5.4 已完成 Release 构建及原发布证书签名，本次没有运行额外测试、Lint、截图、模拟器或电视实测。源码包未进行独立构建，不宣称与签名 APK 逐字节可复现。
 
 仓库 Actions 只提供手动触发的未签名 APK 构建，不读取发布私钥，不自动创建 Release。预览版的下载地址使用明确版本标签，避免将预览包误当作稳定版。
