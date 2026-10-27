@@ -1,5 +1,6 @@
 package io.github.jqssun.airplay.renderer
 
+import android.media.MediaCodecList
 import io.github.jqssun.airplay.bridge.NativeBridge
 import io.github.jqssun.airplay.viewmodel.AudioDebug
 
@@ -57,7 +58,8 @@ class AudioRenderer {
         if (serverHandle == 0L) return
         NativeBridge.nativeServerAudioConfigure(
             serverHandle, config.cushionMs, config.percentilePct, config.oboeBufferFrames,
-            config.forceSwAlac, config.forceSwAac, config.realtimePriority, config.lowLatency,
+            config.forceSwAlac, config.forceSwAac, supportsInProcessAac,
+            config.realtimePriority, config.lowLatency,
             config.benchmarkLog)
     }
 
@@ -95,6 +97,17 @@ class AudioRenderer {
     }
 
     companion object {
+        // Query metadata once; trying to create a missing codec can block audio reception
+        // for seconds on TV firmware. The platform default remains the fallback.
+        private val supportsInProcessAac: Boolean by lazy {
+            runCatching {
+                MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.any { info ->
+                    !info.isEncoder && info.name == "c2.android.inproc.aac.decoder" &&
+                        info.supportedTypes.any { it.equals("audio/mp4a-latm", ignoreCase = true) }
+                }
+            }.getOrDefault(false)
+        }
+
         // must be >= native sizeof(AudioDebugData) (38 B)
         private const val DEBUG_BUF_BYTES = 64
         const val CT_ALAC = 2

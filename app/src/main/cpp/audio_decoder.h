@@ -121,6 +121,12 @@ struct LatencyProbe {
         return (size_t)(mWrite.load(std::memory_order_relaxed) -
                         mRead.load(std::memory_order_relaxed));
     }
+
+    // Only while both feeding and draining the codec are stopped.
+    void reset() {
+        mWrite.store(0, std::memory_order_relaxed);
+        mRead.store(0, std::memory_order_relaxed);
+    }
 };
 
 // decodes one encoded airplay audio packet and pushes PCM onto the timeline
@@ -129,6 +135,9 @@ public:
     virtual ~Decoder() = default;
     // called on RAOP receive thread; returns false = non-critical decode error
     virtual bool decode(const uint8_t *data, size_t len, int64_t ptsNs) = 0;
+    // Same producer thread as decode(); flushes the decoder and producer timeline.
+    // False asks the engine to destroy the decoder before resetting the timeline.
+    virtual bool flush() = 0;
 };
 
 // 24-byte ALACSpecificConfig "magic cookie" (big-endian)
@@ -208,16 +217,12 @@ public:
     // takes ownership of already-created+started codec
     MediaCodecDecoder(AMediaCodec *codec, TimelineBuffer &timeline, LatencyReporter &lat)
         : mCodec(codec), mTimeline(timeline), mLat(lat) {
-        mDrainRun.store(true, std::memory_order_relaxed);
-        mDrainThread = std::thread(&MediaCodecDecoder::drainLoop, this);
+        startDrain();
     }
 
     ~MediaCodecDecoder() override {
         // stop drain thread before touching the codec it reads from
-        if (mDrainThread.joinable()) {
-            mDrainRun.store(false, std::memory_order_relaxed);
-            mDrainThread.join();
-        }
+        stopDrain();
         if (mCodec) { AMediaCodec_stop(mCodec); AMediaCodec_delete(mCodec); }
     }
 
@@ -235,14 +240,38 @@ public:
                    AMEDIA_OK && n == len;
     }
 
+    bool flush() override {
+        stopDrain();
+        // A flush before the first output/format change can discard codec-specific
+        // data on Android. Recreate with the original CSD instead in that case.
+        if (!mOutputEstablished || AMediaCodec_flush(mCodec) != AMEDIA_OK) return false;
+        mProbe.reset();
+        mLat.setHeld(0);
+        mTimeline.resetForDiscontinuity();
+        startDrain();
+        return true;
+    }
+
 private:
     static constexpr int64_t DRAIN_TIMEOUT_US = 20000;
+
+    void startDrain() {
+        mDrainRun.store(true, std::memory_order_relaxed);
+        mDrainThread = std::thread(&MediaCodecDecoder::drainLoop, this);
+    }
+
+    void stopDrain() {
+        mDrainRun.store(false, std::memory_order_relaxed);
+        if (mDrainThread.joinable()) mDrainThread.join();
+    }
 
     void drainLoop() {
         AMediaCodecBufferInfo info;
         while (mDrainRun.load(std::memory_order_relaxed)) {
             ssize_t oi = AMediaCodec_dequeueOutputBuffer(mCodec, &info, DRAIN_TIMEOUT_US);
+            if (oi == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) mOutputEstablished = true;
             if (oi < 0) continue;  // timeout / format / buffers changed
+            mOutputEstablished = true;
             size_t osz = 0;
             uint8_t *out = AMediaCodec_getOutputBuffer(mCodec, (size_t)oi, &osz);
             if (out && info.size > 0) {
@@ -264,6 +293,7 @@ private:
     LatencyProbe mProbe;
     std::thread mDrainThread;
     std::atomic<bool> mDrainRun{false};
+    bool mOutputEstablished = false; // drain thread; flush reads only after join
 };
 
 static inline void installFfmpegLogcat() {
@@ -322,6 +352,14 @@ public:
         mLat.record(monoNs() - t0);
         mLat.setHeld(0);
         return ret == AVERROR(EAGAIN);
+    }
+
+    bool flush() override {
+        avcodec_flush_buffers(mCtx);
+        av_frame_unref(mFrame);
+        mLat.setHeld(0);
+        mTimeline.resetForDiscontinuity();
+        return true;
     }
 
 private:
@@ -395,10 +433,12 @@ private:
 // ---- decoder factories ----
 // create + configure + start; nullptr on failure
 static inline AMediaCodec *startCodec(const char *mime, const char *name, AMediaFormat *fmt,
-                                      LogSink &log) {
+                                      LogSink &log, bool *creationFailed = nullptr) {
+    if (creationFailed) *creationFailed = false;
     const char *label = name ? name : "default";
     AMediaCodec *codec = name ? AMediaCodec_createCodecByName(name) : AMediaCodec_createDecoderByType(mime);
     if (!codec) {
+        if (creationFailed) *creationFailed = true;
         log.warn("%s decoder (%s) create failed", mime, label);
         return nullptr;
     }
@@ -419,7 +459,7 @@ static inline AMediaCodec *startCodec(const char *mime, const char *name, AMedia
 
 // tries c.preferName first if set, then platform default
 static inline AMediaCodec *startMediaCodec(const CodecConfig &c, LogSink &log, bool realtimePriority,
-                                           bool lowLatency) {
+                                           bool lowLatency, bool preferInProcessAac) {
     AMediaFormat *fmt = AMediaFormat_new();
     AMediaFormat_setString(fmt, "mime", c.mime);
     AMediaFormat_setInt32(fmt, "sample-rate", c.sampleRate);
@@ -432,7 +472,15 @@ static inline AMediaCodec *startMediaCodec(const CodecConfig &c, LogSink &log, b
     if (realtimePriority) AMediaFormat_setInt32(fmt, "priority", 0);
     if (lowLatency) AMediaFormat_setInt32(fmt, "low-latency", 1);
     AMediaFormat_setBuffer(fmt, "csd-0", c.csd, c.csdLen);
-    AMediaCodec *codec = c.preferName ? startCodec(c.mime, c.preferName, fmt, log) : nullptr;
+    // Device capability comes from MediaCodecList. A listed component can still
+    // be absent at creation time; do not repeat that expensive failed lookup.
+    static std::atomic<bool> inProcessAacUnavailable{false};
+    AMediaCodec *codec = nullptr;
+    if (preferInProcessAac && c.preferName && !inProcessAacUnavailable.load(std::memory_order_relaxed)) {
+        bool creationFailed = false;
+        codec = startCodec(c.mime, c.preferName, fmt, log, &creationFailed);
+        if (creationFailed) inProcessAacUnavailable.store(true, std::memory_order_relaxed);
+    }
     if (!codec) codec = startCodec(c.mime, nullptr, fmt, log);
     AMediaFormat_delete(fmt);
     return codec;
@@ -441,14 +489,14 @@ static inline AMediaCodec *startMediaCodec(const CodecConfig &c, LogSink &log, b
 static inline std::unique_ptr<Decoder> makeDecoder(int ct, int spf, int sampleRate, int channels,
                                                    TimelineBuffer &timeline, LatencyReporter &lat,
                                                    LogSink &log, bool forceSw,
-                                                   bool realtimePriority, bool lowLatency) {
+                                                   bool preferInProcessAac, bool realtimePriority, bool lowLatency) {
     const auto c = codecConfig(ct, spf, sampleRate, channels);
     if (!c) {
         log.error("Unknown audio ct=%d", ct);
         return nullptr;
     }
     if (!forceSw) {
-        if (AMediaCodec *codec = startMediaCodec(*c, log, realtimePriority, lowLatency))
+        if (AMediaCodec *codec = startMediaCodec(*c, log, realtimePriority, lowLatency, preferInProcessAac))
             return std::make_unique<MediaCodecDecoder>(codec, timeline, lat);
     }
     if (auto sw = FfmpegDecoder::make(*c, timeline, lat, log)) {

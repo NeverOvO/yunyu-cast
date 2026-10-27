@@ -24,6 +24,9 @@ public:
         return mWrite.load(std::memory_order_acquire) - mRead.load(std::memory_order_acquire);
     }
 
+    // A producer can publish this boundary for the consumer to discard later.
+    size_t writePosition() const { return mWrite.load(std::memory_order_acquire); }
+
     // producer: push up to n samples, drops what doesn't fit
     size_t write(const int16_t *src, size_t n) {
         const size_t w = mWrite.load(std::memory_order_relaxed);
@@ -59,6 +62,15 @@ public:
         const size_t avail = w - r;
         if (n > avail) n = avail;
         mRead.store(r + n, std::memory_order_release);
+    }
+
+    // consumer only: discard an old generation without consuming newer PCM.
+    void skipThrough(size_t boundary) {
+        const size_t r = mRead.load(std::memory_order_relaxed);
+        const size_t w = mWrite.load(std::memory_order_acquire);
+        // Unsigned distances also work when ARM32 counters wrap during long playback.
+        // A boundary already consumed is behind r and must never rewind the reader.
+        if (boundary - r <= w - r) mRead.store(boundary, std::memory_order_release);
     }
 
 private:
@@ -128,6 +140,14 @@ public:
     // reset clock base after discontinuity or clock shift/resync so it doesn't poison
     // jitter calculations; producer-thread only (same as observe())
     void reanchor() { mHaveBase = false; }
+
+    // producer only: a new sound must not inherit a previous burst's jitter history.
+    void reset() {
+        std::fill_n(mHist, NBUCKETS, int64_t{0});
+        mBaseNs = 0;
+        mHaveBase = false;
+        mTuned.store(mFloor, std::memory_order_relaxed);
+    }
 
     // latest tuned cushion in samples; any thread
     size_t target() const { return mTuned.load(std::memory_order_relaxed); }
@@ -220,6 +240,14 @@ public:
     // producer: push samples
     void write(const int16_t *pcm, size_t samples, int64_t ptsNs) {
         if (samples == 0) return;
+        const int64_t now = monoNs();
+        const bool underran = mUnderran.exchange(false, std::memory_order_relaxed);
+        // A real output underrun followed by a quiet interval is a new sound, not
+        // another network-jitter sample from the previous clip.
+        if (underran && mLastPcmArrivalNs != 0 && now - mLastPcmArrivalNs >= IDLE_RESET_NS) {
+            resetForDiscontinuity();
+        }
+        mLastPcmArrivalNs = now;
         // pts 0 = sender clock not NTP synced yet
         if (ptsNs == 0) {
             mRing.write(pcm, samples);
@@ -229,7 +257,7 @@ public:
 
         // consumer underran since last write: it already played the gap as real-time
         // silence, re-anchor so we don't also insert it here
-        if (mUnderran.exchange(false, std::memory_order_relaxed)) {
+        if (underran) {
             mExpectedPtsNs = ptsNs;
         }
         const int64_t gapNs = ptsNs - mExpectedPtsNs;
@@ -239,7 +267,7 @@ public:
         if (gapNs > MAX_GAP_NS || gapNs < -MAX_GAP_NS) mTracker.reanchor();
 
         // no-op in static-cushion mode
-        mTracker.observe(ptsNs, monoNs(), durNs);
+        mTracker.observe(ptsNs, now, durNs);
 
         if (gapNs > MAX_GAP_NS || gapNs < -MAX_GAP_NS) {
             // discontinuity: write immediately. new sound after long silence resets
@@ -261,8 +289,17 @@ public:
     // consumer: pop frames*channels samples into out, silence-padded on underrun
     void read(int16_t *out, int32_t frames) {
         const size_t need = (size_t)frames * mChannels;
-        const size_t tuned = mTracker.target();
         const int64_t now = monoNs();
+        const uint64_t generation = mResetGeneration.load(std::memory_order_acquire);
+        if (generation != mReadGeneration) {
+            mRing.skipThrough(mDiscardThrough.load(std::memory_order_relaxed));
+            mPriming = true;
+            mPrimeSilenceFrames = 0;
+            mLastTrimBlockNs = now;
+            mAboveCapSinceNs = 0;
+            mReadGeneration = generation;
+        }
+        const size_t tuned = mTracker.target();
 
         // bound latency: cap tracks tuned cushion live so a calmed link sheds latency
         // without an underrun. each trim costs a glitch, so be conservative: trim only
@@ -319,6 +356,17 @@ public:
     // concurrently with write()
     void reanchorTracker() { mTracker.reanchor(); }
 
+    // Producer only; outside write(), stop the decoder's old drain thread first.
+    // Oboe owns the read pointer: publish a boundary instead of racing with skip().
+    void resetForDiscontinuity() {
+        mExpectedPtsNs = 0;
+        mLastPcmArrivalNs = 0;
+        mTracker.reset();
+        mUnderran.store(false, std::memory_order_relaxed);
+        mDiscardThrough.store(mRing.writePosition(), std::memory_order_relaxed);
+        mResetGeneration.fetch_add(1, std::memory_order_release);
+    }
+
     // rebuild prebuffer cushion before resuming, e.g. after output stream restart;
     // must not run concurrently with read()
     void reprime() { mPriming = true; }
@@ -328,6 +376,9 @@ public:
     void flushAndReprime() {
         mRing.skip(mRing.available());
         mPriming = true;
+        mPrimeSilenceFrames = 0;
+        mLastTrimBlockNs = monoNs();
+        mAboveCapSinceNs = 0;
     }
 
     // debug snapshot: backlog + tuned cushion (ms) + counters; reads only atomics, any thread
@@ -364,6 +415,7 @@ private:
 
     static constexpr int64_t SLACK_NS = 10'000'000LL;    // ignore <10ms gaps (NTP shift, rounding)
     static constexpr int64_t MAX_GAP_NS = 750'000'000LL; // >750ms = discontinuity, re-anchor
+    static constexpr int64_t IDLE_RESET_NS = 250'000'000LL;
     static constexpr int TRIM_FLOOR_MS = 30;             // min trim point even for tiny cushion
     static constexpr int TRIM_THROTTLE_MS = 2000;        // min spacing between trims, and after underrun
     static constexpr int64_t TRIM_THROTTLE_NS = (int64_t)TRIM_THROTTLE_MS * 1'000'000LL;
@@ -381,7 +433,12 @@ private:
     int64_t mAboveCapSinceNs = 0;        // consumer-only: when backlog first exceeded cap (0 = under)
     std::atomic<bool> mUnderran{false};  // consumer->producer: underrun happened
 
+    std::atomic<size_t> mDiscardThrough{0}; // producer->consumer: old PCM boundary
+    std::atomic<uint64_t> mResetGeneration{0};
+    uint64_t mReadGeneration = 0;       // consumer only
+
     int64_t mExpectedPtsNs = 0;          // presentation time expected at write head
+    int64_t mLastPcmArrivalNs = 0;       // producer only
 };
 
 #endif  // TIMELINE_BUFFER_H

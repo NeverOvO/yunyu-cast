@@ -36,6 +36,7 @@ struct AudioConfig {
     const int oboeBufferFrames;  // 0 = auto, two bursts in low-latency mode, oboe default in power save
     const bool forceSwAlac;      // embedded ffmpeg software ALAC even when HW available
     const bool forceSwAac;       // embedded ffmpeg software AAC-LC/ELD
+    const bool preferInProcessAac; // optional component actually listed by this device
     const bool realtimePriority; // decoder: request realtime priority
     const bool lowLatency;       // low-latency decoder + oboe low-latency output
     const bool benchmarkLog;     // periodically log decoder stats
@@ -96,6 +97,25 @@ struct AudioEngine {
         mDecoder = {};
     }
 
+    // Called by the same RAOP worker as decode(), not by the output callback.
+    void flush() {
+        if (!mTimeline) return;
+        const bool resetByDecoder = mDecoder.decoder && mDecoder.decoder->flush();
+        if (!resetByDecoder) {
+            if (mDecoder.decoder) {
+                // Failed/early MediaCodec flush must not leave an unusable decoder
+                // selected. Its destructor joins any remaining drain worker.
+                mDecoder = {};
+                mLog->info("Audio decoder will restart after flush");
+            }
+            mTimeline->resetForDiscontinuity();
+        }
+        // A reusable decoder resets the timeline while its drain worker is joined,
+        // before restarting that worker. The failed/no-decoder case resets above.
+        mRetryAtNs = 0;
+        mLog->info("Audio flush: decoder and buffered sound reset");
+    }
+
     void setClientGain(float g) {
         std::lock_guard<std::mutex> lk(mRebuildLock);
         mClientGain = g;
@@ -145,14 +165,14 @@ struct AudioEngine {
         const bool changed = ct != mDecoder.ct || wantConfig != mDecoder.format;
         if (changed || (!mDecoder.decoder && monoNs() >= mRetryAtNs)) {
             mDecoder = {}; // release old decoder first to free resources
+            mTimeline->resetForDiscontinuity();
+            if (changed) mLog->info("Audio format reset: ct=%d spf=%d", ct, wantConfig.spf);
             mDecoder = {ct, wantConfig,
                         makeDecoder(ct, wantConfig.spf, mSampleRate, mChannels, *mTimeline,
                                     mDecLatency, *mLog,
                                     ct == CT_ALAC ? mApplied->forceSwAlac : mApplied->forceSwAac,
-                                    mApplied->realtimePriority, mApplied->lowLatency)};
+                                    mApplied->preferInProcessAac, mApplied->realtimePriority, mApplied->lowLatency)};
             mRetryAtNs = mDecoder.decoder ? 0 : monoNs() + DECODER_RETRY_NS;
-            // codec switch is definitely a discontinuity
-            mTimeline->reanchorTracker();
         }
         if (mDecoder.decoder && !mDecoder.decoder->decode(data, len, ptsNs))
             mDecodeErrors.fetch_add(1, std::memory_order_relaxed);
@@ -234,10 +254,10 @@ void audio_engine_set_default_stream_values(int sampleRate, int framesPerBurst) 
 
 bool audio_engine_configure(AudioEngine *engine, int cushionMs, int percentilePct,
                             int oboeBufferFrames, bool forceSwAlac, bool forceSwAac,
-                            bool realtimePriority, bool lowLatency, bool benchmarkLog) {
+                            bool preferInProcessAac, bool realtimePriority, bool lowLatency, bool benchmarkLog) {
     if (!engine) return false;
     return engine->configure({cushionMs, percentilePct, oboeBufferFrames, forceSwAlac, forceSwAac,
-                              realtimePriority, lowLatency, benchmarkLog});
+                              preferInProcessAac, realtimePriority, lowLatency, benchmarkLog});
 }
 
 void audio_engine_set_client_gain(AudioEngine *engine, float gain) {
@@ -254,6 +274,10 @@ bool audio_engine_start(AudioEngine *engine) {
 
 void audio_engine_pause(AudioEngine *engine) {
     if (engine) engine->pause();
+}
+
+void audio_engine_flush(AudioEngine *engine) {
+    if (engine) engine->flush();
 }
 
 bool audio_engine_get_debug(AudioEngine *engine, void *dst, size_t dstLen) {

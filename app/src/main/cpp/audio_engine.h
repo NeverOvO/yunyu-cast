@@ -25,7 +25,7 @@ void audio_engine_set_default_stream_values(int sampleRate, int framesPerBurst);
 /* change engine config; any thread */
 bool audio_engine_configure(AudioEngine *engine, int cushionMs, int percentilePct,
                             int oboeBufferFrames, bool forceSwAlac, bool forceSwAac,
-                            bool realtimePriority, bool lowLatency, bool benchmarkLog);
+                            bool preferInProcessAac, bool realtimePriority, bool lowLatency, bool benchmarkLog);
 
 /* sender volume as linear output gain, 1 = unity */
 void audio_engine_set_client_gain(AudioEngine *engine, float gain);
@@ -38,6 +38,9 @@ bool audio_engine_start(AudioEngine *engine);
 
 /* pause playout, releases audio output devices while paused; idempotent */
 void audio_engine_pause(AudioEngine *engine);
+
+/* discard the previous sound; same RAOP producer thread as decode, not concurrent with destroy */
+void audio_engine_flush(AudioEngine *engine);
 
 /* refresh + copy packed debug struct into dst; false if engine NULL or dstLen too small */
 bool audio_engine_get_debug(AudioEngine *engine, void *dst, size_t dstLen);

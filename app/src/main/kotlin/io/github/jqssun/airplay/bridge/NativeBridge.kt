@@ -41,7 +41,8 @@ object NativeBridge {
     external fun nativeSetDefaultStreamValues(sampleRate: Int, framesPerBurst: Int)
     external fun nativeServerAudioConfigure(handle: Long, cushionMs: Int, percentilePct: Int,
                                             oboeBufferFrames: Int, forceSwAlac: Boolean,
-                                            forceSwAac: Boolean, realtimePriority: Boolean,
+                                            forceSwAac: Boolean, preferInProcessAac: Boolean,
+                                            realtimePriority: Boolean,
                                             lowLatency: Boolean, benchmarkLog: Boolean): Boolean
     external fun nativeServerAudioStart(handle: Long): Boolean
     external fun nativeServerAudioStop(handle: Long)
