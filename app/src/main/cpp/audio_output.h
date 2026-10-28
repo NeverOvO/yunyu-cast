@@ -3,6 +3,7 @@
 
 #include <oboe/Oboe.h>
 #include <atomic>
+#include <cstring>
 #include <memory>
 #include <mutex>
 
@@ -28,9 +29,14 @@ public:
 
     void setClientGain(float g) { mClientGain.store(g, std::memory_order_relaxed); }
 
-    oboe::DataCallbackResult onAudioReady(oboe::AudioStream *, void *audioData,
+    oboe::DataCallbackResult onAudioReady(oboe::AudioStream *stream, void *audioData,
                                           int32_t numFrames) override {
         auto *out = static_cast<int16_t *>(audioData);
+        if (mActiveStream.load(std::memory_order_acquire) != stream) {
+            // A retired stream must not become a second consumer after replacement.
+            if (numFrames > 0) memset(out, 0, (size_t)numFrames * mChannels * sizeof(int16_t));
+            return oboe::DataCallbackResult::Stop;
+        }
         mTimeline->read(out, numFrames);
 
         const float gain = mClientGain.load(std::memory_order_relaxed);
@@ -50,6 +56,7 @@ private:
     std::shared_ptr<LogSink> mLog;
     const int mChannels;
     std::atomic<float> mClientGain{1.0f};
+    std::atomic<oboe::AudioStream *> mActiveStream{nullptr};
     std::weak_ptr<AudioOutput> mOwner;
 };
 
@@ -80,24 +87,31 @@ public:
 
     bool start() {
         std::lock_guard<std::mutex> lk(mLock);
-        mClosing.store(false);
-        if (!openLocked()) return false;
-        if (mStream->requestStart() != oboe::Result::OK) {
-            mStream->close();
-            mStream.reset();
+        if (isActive()) return true;
+        closeLocked();
+        // No old data callback can still consume the ring after close returns.
+        mTimeline->flushAndReprime();
+        if (!openLocked()) {
+            closeLocked();
+            return false;
+        }
+        // Publish before requestStart: an immediate error callback must be able to
+        // invalidate this stream without waiting for mLock.
+        mCallbacks->mActiveStream.store(mStream.get(), std::memory_order_release);
+        const oboe::Result result = mStream->requestStart();
+        if (result != oboe::Result::OK || !isActive()) {
+            mLog->error("Failed to start Oboe stream: %s", oboe::convertToText(result));
+            closeLocked();
             return false;
         }
         return true;
     }
 
+    bool isActive() const { return mCallbacks->mActiveStream.load(std::memory_order_acquire) != nullptr; }
+
     void stop() {
         std::lock_guard<std::mutex> lk(mLock);
-        mClosing.store(true);
-        if (mStream) {
-            mStream->stop();
-            mStream->close();
-            mStream.reset();
-        }
+        closeLocked();
     }
 
     void setClientGain(float g) { mCallbacks->setClientGain(g); }
@@ -118,15 +132,21 @@ public:
 private:
     friend class OboeCallbacks;
 
-    // oboe error thread, on device loss: reopen and restart unless tearing down
-    void reopenAfterError(oboe::AudioStream *failedStream) {
-        std::lock_guard<std::mutex> lk(mLock);
-        // An old stream can report its error after pause/start already opened a
-        // replacement. Never reset that replacement or create a second reader.
-        if (mClosing.load() || mStream.get() != failedStream) return;
-        mStream.reset();
-        mTimeline->reprime();
-        if (openLocked()) mStream->requestStart();
+    // Error callbacks only publish state. close()/stop() may wait for a callback,
+    // so taking mLock or reopening here would risk a lock inversion.
+    bool markClosedAfterError(oboe::AudioStream *failedStream) {
+        return mCallbacks->mActiveStream.compare_exchange_strong(failedStream, nullptr, std::memory_order_acq_rel);
+    }
+
+    void closeLocked() {
+        // Retire identity before stopping. A late error from this stream cannot
+        // invalidate a later replacement, and no callback can restart after stop.
+        mCallbacks->mActiveStream.store(nullptr, std::memory_order_release);
+        if (mStream) {
+            mStream->stop();
+            mStream->close();
+            mStream.reset();
+        }
     }
 
     bool openLocked() {  // caller holds mLock
@@ -184,7 +204,6 @@ private:
 
     std::shared_ptr<TimelineBuffer> mTimeline;
     std::shared_ptr<LogSink> mLog;
-    std::atomic<bool> mClosing{false};
     std::shared_ptr<OboeCallbacks> mCallbacks;
     std::shared_ptr<oboe::AudioStream> mStream;
     std::mutex mLock;                    // guards open/close
@@ -192,10 +211,10 @@ private:
 };
 
 inline void OboeCallbacks::onErrorAfterClose(oboe::AudioStream *failedStream, oboe::Result error) {
-    // device disconnect (e.g. BT/headset change): oboe already closed the stream, ask
-    // AudioOutput to reopen
-    mLog->error("Oboe stream error: %s - reopening", oboe::convertToText(error));
-    if (auto owner = mOwner.lock()) owner->reopenAfterError(failedStream);
+    // The engine retries on its producer thread while playback is requested.
+    // Ignore errors from streams already retired by pause/reconfiguration.
+    if (auto owner = mOwner.lock(); owner && owner->markClosedAfterError(failedStream))
+        mLog->error("Oboe stream error: %s - recovery pending", oboe::convertToText(error));
 }
 
 #endif  // AUDIO_OUTPUT_H

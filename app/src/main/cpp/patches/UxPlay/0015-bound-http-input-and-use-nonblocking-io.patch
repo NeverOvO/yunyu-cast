@@ -1,0 +1,1431 @@
+diff --git a/lib/http_request.h b/lib/http_request.h
+--- a/lib/http_request.h
++++ b/lib/http_request.h
+@@ -16,11 +16,22 @@
+ #define HTTP_REQUEST_H
+ 
+ #include <stdbool.h>
++#include <stddef.h>
++
++/* Control requests carry plists/playlists/cover art, not video segments. */
++#define HTTP_REQUEST_MAX_URL_SIZE (8U * 1024U)
++#define HTTP_REQUEST_MAX_HEADERS_SIZE (32U * 1024U)
++#define HTTP_REQUEST_MAX_HEADER_FIELDS 20U
++#define HTTP_REQUEST_MAX_HEADER_NAME_SIZE 64U
++#define HTTP_REQUEST_MAX_HEADER_VALUE_SIZE 1024U
++#define HTTP_REQUEST_MAX_BODY_SIZE (8U * 1024U * 1024U)
++#define HTTP_REQUEST_MAX_WIRE_SIZE (HTTP_REQUEST_MAX_BODY_SIZE + HTTP_REQUEST_MAX_HEADERS_SIZE)
+ 
+ typedef struct http_request_s http_request_t;
+ 
+ http_request_t *http_request_init(void);
+ 
++/* Returns bytes consumed, stopping at one complete request, or -1 on error. */
+ int http_request_add_data(http_request_t *request, const char *data, int datalen);
+ int http_request_is_complete(http_request_t *request);
+ int http_request_has_error(http_request_t *request);
+diff --git a/lib/http_request.c b/lib/http_request.c
+--- a/lib/http_request.c
++++ b/lib/http_request.c
+@@ -26,36 +26,103 @@
+ struct http_request_s {
+     llhttp_t parser;
+     llhttp_settings_t parser_settings;
+-
+-    bool is_reverse;  // if true, this is a reverse-response from client
++    bool is_reverse;
+     const char *method;
++    const char *error_reason;
+     char *url;
+-    char protocol[9];
+-
+-    char **headers;
+-    int headers_size;
+-    int headers_index;
++    size_t url_length;
++    char protocol[16];
++    size_t protocol_length;
++
++    char *headers[HTTP_REQUEST_MAX_HEADER_FIELDS * 2];
++    size_t header_lengths[HTTP_REQUEST_MAX_HEADER_FIELDS * 2];
++    unsigned int num_headers;
++    bool in_header_field;
++    bool headers_complete;
++    size_t header_bytes;
++    size_t header_wire_bytes;
++    bool header_scan_started;
++    bool header_line_has_data;
++    bool header_scan_done;
+ 
+     char *data;
+-    int datalen;
+-
++    size_t datalen;
++    size_t data_capacity;
++    size_t wire_bytes;
+     int complete;
+ };
+ 
+ static int
++request_error(http_request_t *request, const char *reason)
++{
++    request->error_reason = reason;
++    llhttp_set_error_reason(&request->parser, reason);
++    return -1;
++}
++
++static int
++append_string(http_request_t *request, char **target, size_t *used,
++              const char *at, size_t length, size_t limit)
++{
++    if (length > limit - *used) {
++        return request_error(request, "HTTP request field exceeds limit");
++    }
++    char *next = realloc(*target, *used + length + 1);
++    if (!next) {
++        return request_error(request, "Unable to allocate HTTP request field");
++    }
++    memcpy(next + *used, at, length);
++    *used += length;
++    next[*used] = '\0';
++    *target = next;
++    return 0;
++}
++
++static int
+ on_url(llhttp_t *parser, const char *at, size_t length)
+ {
+     http_request_t *request = parser->data;
+-    int urllen = request->url ? strlen(request->url) : 0;
+-
+-    request->url = realloc(request->url, urllen+length+1);
+-    assert(request->url);
+-
+-    request->url[urllen] = '\0';
+-    strncat(request->url, at, length);
+-
+-    strncpy(request->protocol, at + length + 1, 8);
+-
++    return append_string(request, &request->url, &request->url_length,
++                         at, length, HTTP_REQUEST_MAX_URL_SIZE);
++}
++
++static int
++on_protocol(llhttp_t *parser, const char *at, size_t length)
++{
++    http_request_t *request = parser->data;
++    if (length > sizeof(request->protocol) - 1 - request->protocol_length) {
++        return request_error(request, "HTTP protocol token exceeds limit");
++    }
++    memcpy(request->protocol + request->protocol_length, at, length);
++    request->protocol_length += length;
++    request->protocol[request->protocol_length] = '\0';
++    return 0;
++}
++
++static int
++on_protocol_complete(llhttp_t *parser)
++{
++    return on_protocol(parser, "/", 1);
++}
++
++static int
++on_version(llhttp_t *parser, const char *at, size_t length)
++{
++    return on_protocol(parser, at, length);
++}
++
++static int
++append_header(http_request_t *request, unsigned int index,
++              const char *at, size_t length, size_t limit)
++{
++    if (length > HTTP_REQUEST_MAX_HEADERS_SIZE - request->header_bytes) {
++        return request_error(request, "HTTP headers exceed limit");
++    }
++    if (append_string(request, &request->headers[index], &request->header_lengths[index],
++                      at, length, limit) < 0) {
++        return -1;
++    }
++    request->header_bytes += length;
+     return 0;
+ }
+ 
+@@ -63,59 +130,54 @@
+ on_header_field(llhttp_t *parser, const char *at, size_t length)
+ {
+     http_request_t *request = parser->data;
+-
+-    /* Check if our index is a value */
+-    if (request->headers_index%2 == 1) {
+-        request->headers_index++;
+-    }
+-
+-    /* Allocate space for new field-value pair */
+-    if (request->headers_index == request->headers_size) {
+-        request->headers_size += 2;
+-        request->headers = realloc(request->headers,
+-                                   request->headers_size*sizeof(char*));
+-        assert(request->headers);
+-        request->headers[request->headers_index] = NULL;
+-        request->headers[request->headers_index+1] = NULL;
+-    }
+-
+-    /* Allocate space in the current header string */
+-    if (request->headers[request->headers_index] == NULL) {
+-        request->headers[request->headers_index] = calloc(1, length + 1);
+-    } else {
+-        request->headers[request->headers_index] = realloc(
+-                request->headers[request->headers_index],
+-                strlen(request->headers[request->headers_index]) + length + 1
+-        );
+-    }
+-    assert(request->headers[request->headers_index]);
+-
+-    strncat(request->headers[request->headers_index], at, length);
+-    return 0;
++    if (!request->in_header_field) {
++        if (request->num_headers == HTTP_REQUEST_MAX_HEADER_FIELDS) {
++            return request_error(request, "Too many HTTP header fields");
++        }
++        request->num_headers++;
++        request->in_header_field = true;
++    }
++    return append_header(request, (request->num_headers - 1) * 2, at, length,
++                         HTTP_REQUEST_MAX_HEADER_NAME_SIZE);
++}
++
++static int
++on_header_field_complete(llhttp_t *parser)
++{
++    http_request_t *request = parser->data;
++    request->in_header_field = false;
++    /* Empty values are valid and must still be safe for string consumers. */
++    return append_header(request, (request->num_headers - 1) * 2 + 1, "", 0,
++                         HTTP_REQUEST_MAX_HEADER_VALUE_SIZE);
+ }
+ 
+ static int
+ on_header_value(llhttp_t *parser, const char *at, size_t length)
+ {
+     http_request_t *request = parser->data;
+-
+-    /* Check if our index is a field */
+-    if (request->headers_index%2 == 0) {
+-        request->headers_index++;
+-    }
+-
+-    /* Allocate space in the current header string */
+-    if (request->headers[request->headers_index] == NULL) {
+-        request->headers[request->headers_index] = calloc(1, length + 1);
+-    } else {
+-        request->headers[request->headers_index] = realloc(
+-                request->headers[request->headers_index],
+-                strlen(request->headers[request->headers_index]) + length + 1
+-        );
+-    }
+-    assert(request->headers[request->headers_index]);
+-
+-    strncat(request->headers[request->headers_index], at, length);
++    return append_header(request, (request->num_headers - 1) * 2 + 1, at, length,
++                         HTTP_REQUEST_MAX_HEADER_VALUE_SIZE);
++}
++
++static int
++on_headers_complete(llhttp_t *parser)
++{
++    http_request_t *request = parser->data;
++    request->headers_complete = true;
++    if ((parser->flags & F_CONTENT_LENGTH) &&
++        parser->content_length > HTTP_REQUEST_MAX_BODY_SIZE) {
++        return request_error(request, "HTTP Content-Length exceeds limit");
++    }
++    return 0;
++}
++
++static int
++on_chunk_header(llhttp_t *parser)
++{
++    http_request_t *request = parser->data;
++    if (parser->content_length > HTTP_REQUEST_MAX_BODY_SIZE - request->datalen) {
++        return request_error(request, "HTTP chunk exceeds remaining body limit");
++    }
+     return 0;
+ }
+ 
+@@ -123,11 +185,29 @@
+ on_body(llhttp_t *parser, const char *at, size_t length)
+ {
+     http_request_t *request = parser->data;
+-
+-    request->data = realloc(request->data, request->datalen + length);
+-    assert(request->data);
+-
+-    memcpy(request->data+request->datalen, at, length);
++    if (length > HTTP_REQUEST_MAX_BODY_SIZE - request->datalen) {
++        return request_error(request, "HTTP body exceeds limit");
++    }
++    if (!length) {
++        return 0;
++    }
++    size_t needed = request->datalen + length;
++    if (needed > request->data_capacity) {
++        size_t capacity = request->data_capacity ? request->data_capacity : 4096;
++        while (capacity < needed) {
++            capacity *= 2;
++        }
++        if (capacity > HTTP_REQUEST_MAX_BODY_SIZE) {
++            capacity = HTTP_REQUEST_MAX_BODY_SIZE;
++        }
++        char *next = realloc(request->data, capacity);
++        if (!next) {
++            return request_error(request, "Unable to allocate HTTP request body");
++        }
++        request->data = next;
++        request->data_capacity = capacity;
++    }
++    memcpy(request->data + request->datalen, at, length);
+     request->datalen += length;
+     return 0;
+ }
+@@ -136,10 +216,10 @@
+ on_message_complete(llhttp_t *parser)
+ {
+     http_request_t *request = parser->data;
+-
+-    request->method = llhttp_method_name(request->parser.method);
++    request->method = llhttp_method_name(parser->method);
+     request->complete = 1;
+-    return 0;
++    /* Preserve any following request in this same TCP read for a new parser. */
++    return HPE_PAUSED;
+ }
+ 
+ http_request_t *
+@@ -149,17 +229,20 @@
+     if (!request) {
+         return NULL;
+     }
+-
+     llhttp_settings_init(&request->parser_settings);
+     request->parser_settings.on_url = &on_url;
++    request->parser_settings.on_protocol = &on_protocol;
++    request->parser_settings.on_protocol_complete = &on_protocol_complete;
++    request->parser_settings.on_version = &on_version;
+     request->parser_settings.on_header_field = &on_header_field;
++    request->parser_settings.on_header_field_complete = &on_header_field_complete;
+     request->parser_settings.on_header_value = &on_header_value;
++    request->parser_settings.on_headers_complete = &on_headers_complete;
++    request->parser_settings.on_chunk_header = &on_chunk_header;
+     request->parser_settings.on_body = &on_body;
+     request->parser_settings.on_message_complete = &on_message_complete;
+-
+     llhttp_init(&request->parser, HTTP_REQUEST, &request->parser_settings);
+     request->parser.data = request;
+-    request->is_reverse = false;
+     return request;
+ }
+ 
+@@ -168,10 +251,9 @@
+ {
+     if (request) {
+         free(request->url);
+-        for (int i = 0; i < request->headers_size; i++) {
++        for (unsigned int i = 0; i < request->num_headers * 2; i++) {
+             free(request->headers[i]);
+         }
+-        free(request->headers);
+         free(request->data);
+         free(request);
+     }
+@@ -181,13 +263,47 @@
+ http_request_add_data(http_request_t *request, const char *data, int datalen)
+ {
+     assert(request);
+-
+-    int ret = llhttp_execute(&request->parser, data, datalen);
+-
+-    /* support for "Upgrade" to reverse http ("PTTH/1.0") protocol */
+-    llhttp_resume_after_upgrade(&request->parser);
+-
+-    return ret;
++    if (datalen <= 0 || request->complete || request->error_reason) {
++        return request_error(request, "Invalid HTTP parser input state");
++    }
++    size_t length = (size_t) datalen;
++    size_t remaining = HTTP_REQUEST_MAX_WIRE_SIZE - request->wire_bytes;
++    if (!remaining) {
++        return request_error(request, "HTTP request wire size exceeds limit");
++    }
++    if (length > remaining) {
++        length = remaining;
++    }
++    /* Count the raw request line and headers, including whitespace that is not
++       delivered to header callbacks. Stop at the first empty header line. */
++    if (!request->header_scan_done) {
++        for (size_t i = 0; i < length; i++) {
++            if (++request->header_wire_bytes > HTTP_REQUEST_MAX_HEADERS_SIZE) {
++                return request_error(request, "HTTP request line and headers exceed limit");
++            }
++            if (data[i] == '\n') {
++                if (request->header_scan_started && !request->header_line_has_data) {
++                    request->header_scan_done = true;
++                    break;
++                }
++                request->header_line_has_data = false;
++            } else if (data[i] != '\r') {
++                request->header_scan_started = true;
++                request->header_line_has_data = true;
++            }
++        }
++    }
++    llhttp_errno_t ret = llhttp_execute(&request->parser, data, length);
++    size_t consumed = length;
++    if (ret != HPE_OK) {
++        if (request->complete && (ret == HPE_PAUSED || ret == HPE_PAUSED_UPGRADE)) {
++            consumed = (size_t) (llhttp_get_error_pos(&request->parser) - data);
++        } else {
++            return -1;
++        }
++    }
++    request->wire_bytes += consumed;
++    return (int) consumed;
+ }
+ 
+ int
+@@ -201,154 +317,103 @@
+ http_request_has_error(http_request_t *request)
+ {
+     assert(request);
+-    if (request->is_reverse) {
+-        return 0;
+-    }
+-    return (llhttp_get_errno(&request->parser) != HPE_OK);
++    llhttp_errno_t error = llhttp_get_errno(&request->parser);
++    return request->error_reason || (error != HPE_OK &&
++           !(request->complete && (error == HPE_PAUSED || error == HPE_PAUSED_UPGRADE)));
+ }
+ 
+ const char *
+ http_request_get_error_name(http_request_t *request)
+ {
+-    assert(request);
+-    if (request->is_reverse) {
+-        return NULL;
+-    }
+-    return llhttp_errno_name(llhttp_get_errno(&request->parser));
++    return request->error_reason ? "HPE_USER" : llhttp_errno_name(llhttp_get_errno(&request->parser));
+ }
+ 
+ const char *
+ http_request_get_error_description(http_request_t *request)
+ {
+-    assert(request);
+-    if (request->is_reverse) {
+-        return NULL;
+-    }
+-    return llhttp_get_error_reason(&request->parser);
++    return request->error_reason ? request->error_reason : llhttp_get_error_reason(&request->parser);
+ }
+ 
+ const char *
+ http_request_get_method(http_request_t *request)
+ {
+-    assert(request);
+-    if (request->is_reverse) {
+-        return NULL;
+-    }
+-    return request->method;
++    return request->is_reverse ? NULL : request->method;
+ }
+ 
+ const char *
+ http_request_get_url(http_request_t *request)
+ {
+-    assert(request);
+-    if (request->is_reverse) {
+-        return NULL;
+-    }
+-    return request->url;
++    return request->is_reverse ? NULL : request->url;
+ }
+ 
+ const char *
+ http_request_get_protocol(http_request_t *request)
+ {
+-    assert(request);
+-    if (request->is_reverse) {
+-        return NULL;
+-    }
+-    return request->protocol;
++    return request->is_reverse ? NULL : request->protocol;
+ }
+ 
+ const char *
+ http_request_get_header(http_request_t *request, const char *name)
+ {
+-    assert(request);
+-    if (request->is_reverse) {
+-        return NULL;
+-    }
+-
+-    for (int i = 0; i < request->headers_size; i += 2) {
+-        if (!strcmp(request->headers[i], name)) {
+-            return request->headers[i+1];
++    if (!request->is_reverse) {
++        for (unsigned int i = 0; i < request->num_headers * 2; i += 2) {
++            if (!strcmp(request->headers[i], name)) {
++                return request->headers[i + 1];
++            }
+         }
+     }
+     return NULL;
+ }
+ 
+ size_t
+-http_request_header_get_size(http_request_t *request, int *num_fields, size_t *max_field_len, size_t *max_value_len) {
+-    size_t total = 0;
+-    if (max_field_len) {
+-        *max_field_len = 0;
+-    }
+-    if (max_value_len) {
+-        *max_value_len = 0;
+-    }
+-    if (num_fields) {
+-        *num_fields = request->headers_size / 2;
+-    }
+-    for (int i = 0; i < request->headers_size; i +=2) {
+-        size_t len = strlen(request->headers[i]);
+-        total += len;
+-        if (i % 2 == 0 && max_field_len && len > *max_field_len) {
+-            *max_field_len = len;
+-        } else if (max_value_len && len > *max_value_len) {
+-            *max_value_len = len;
+-        }
+-    }
+-    return total;
++http_request_header_get_size(http_request_t *request, int *num_fields,
++                             size_t *max_field_len, size_t *max_value_len)
++{
++    if (num_fields) *num_fields = (int) request->num_headers;
++    if (max_field_len) *max_field_len = 0;
++    if (max_value_len) *max_value_len = 0;
++    for (unsigned int i = 0; i < request->num_headers * 2; i++) {
++        size_t *maximum = (i % 2 == 0) ? max_field_len : max_value_len;
++        if (maximum && request->header_lengths[i] > *maximum) {
++            *maximum = request->header_lengths[i];
++        }
++    }
++    return request->header_bytes;
+ }
+ 
+ const char *
+ http_request_get_data(http_request_t *request, int *datalen)
+ {
+-    assert(request);
+-    if (datalen) {
+-        *datalen = request->datalen;
+-    }
++    if (datalen) *datalen = (int) request->datalen;
+     return request->data;
+ }
+ 
+-int 
++int
+ http_request_get_header_string(http_request_t *request, char **header_str)
+ {
+-    if(!request || request->headers_size == 0) {
+-        *header_str = NULL;
+-        return 0;
+-    }
+-    if (request->is_reverse) {
+-        *header_str = NULL;
+-        return 0;
+-    }    
+-    int len = 0;
+-    for (int i = 0; i < request->headers_size; i++) {
+-        len += strlen(request->headers[i]);
++    *header_str = NULL;
++    if (!request || request->is_reverse) {
++        return -1;
++    }
++    size_t length = request->header_bytes + request->num_headers * 3;
++    char *str = malloc(length + 1);
++    if (!str) {
++        return -1;
++    }
++    char *p = str;
++    for (unsigned int i = 0; i < request->num_headers * 2; i++) {
++        memcpy(p, request->headers[i], request->header_lengths[i]);
++        p += request->header_lengths[i];
+         if (i % 2 == 0) {
+-            len += 2;
+-        } else {
+-            len++;
+-        }
+-    }
+-    char *str = (char *) calloc(len+1, sizeof(char));
+-    assert(str);
+-    *header_str = str;
+-    char *p = str;
+-    int n = len + 1;
+-    for (int i = 0; i < request->headers_size; i++) {
+-        int hlen = strlen(request->headers[i]); 
+-        snprintf(p, n, "%s", request->headers[i]);
+-        n -= hlen;
+-        p += hlen;
+-        if (i % 2 == 0) {
+-            snprintf(p, n, ": ");
+-            n -= 2;
++            memcpy(p, ": ", 2);
+             p += 2;
+         } else {
+-            snprintf(p, n, "\n");
+-            n--;
+-            p++;
+-        }
+-    }
+-    assert(p == &(str[len]));
+-    return len;
++            *p++ = '\n';
++        }
++    }
++    *p = '\0';
++    *header_str = str;
++    return (int) length;
+ }
+ 
+ bool http_request_is_reverse(http_request_t *request) {
+diff --git a/lib/httpd.h b/lib/httpd.h
+--- a/lib/httpd.h
++++ b/lib/httpd.h
+@@ -52,6 +52,8 @@
+ httpd_t *httpd_init(logger_t *logger, httpd_callbacks_t *callbacks, int  nohold);
+ 
+ int httpd_is_running(httpd_t *httpd);
++/* HTTP-worker-only: copies bytes into the bounded, nonblocking send queue. */
++int httpd_queue_data(httpd_t *httpd, int socket_fd, const char *data, int datalen);
+ 
+ int httpd_start(httpd_t *httpd, unsigned short *port);
+ void httpd_stop(httpd_t *httpd);
+diff --git a/lib/httpd.c b/lib/httpd.c
+--- a/lib/httpd.c
++++ b/lib/httpd.c
+@@ -21,6 +21,8 @@
+ #include <assert.h>
+ #include <stdbool.h>
+ #include <errno.h>
++#include <stdint.h>
++#include <time.h>
+ 
+ #include "httpd.h"
+ #include "netutils.h"
+@@ -44,6 +46,16 @@
+     connection_type_t type;
+     http_request_t *request;
+     int pending_remove;
++    char prefix[8];
++    size_t prefix_length;
++    bool prefix_checked;
++    bool reverse_stream;
++    uint64_t request_started_ms;
++    char *output;
++    size_t output_length;
++    size_t output_offset;
++    uint64_t output_progress_ms;
++    bool close_after_write;
+ };
+ typedef struct http_connection_s http_connection_t;
+ 
+@@ -67,6 +79,89 @@
+     int server_fd6;
+ };
+ 
++/* Bound network work and memory without expiring idle established sessions. */
++#define HTTPD_IO_TIMEOUT_MS 30000U
++#define HTTPD_MAX_PENDING_OUTPUT HTTP_REQUEST_MAX_WIRE_SIZE
++
++static uint64_t
++httpd_now_ms(void)
++{
++#if defined(WIN32)
++    return (uint64_t) GetTickCount64();
++#else
++    struct timespec now;
++    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
++        return (uint64_t) now.tv_sec * 1000U + (uint64_t) now.tv_nsec / 1000000U;
++    }
++    struct timeval fallback;
++    gettimeofday(&fallback, NULL);
++    return (uint64_t) fallback.tv_sec * 1000U + (uint64_t) fallback.tv_usec / 1000U;
++#endif
++}
++
++static int
++httpd_nonblocking(int fd)
++{
++#if defined(WIN32)
++    unsigned long enabled = 1;
++#else
++    int enabled = 1;
++    if (fd < 0 || fd >= FD_SETSIZE) {
++        return -1;
++    }
++#endif
++#ifdef SO_NOSIGPIPE
++    int no_sigpipe = 1;
++    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
++#endif
++    return IOCTLSOCKET(fd, FIONBIO, &enabled);
++}
++
++static bool
++httpd_retry_later(int error)
++{
++    return error == SOCKET_ERRORNAME(EAGAIN) || error == SOCKET_ERRORNAME(EWOULDBLOCK) ||
++           error == SOCKET_ERRORNAME(EINTR);
++}
++
++int
++httpd_queue_data(httpd_t *httpd, int socket_fd, const char *data, int datalen)
++{
++    if (!data || datalen <= 0) {
++        return -1;
++    }
++    for (int i = 0; i < httpd->max_connections; i++) {
++        http_connection_t *connection = &httpd->connections[i];
++        if (!connection->connected || connection->socket_fd != socket_fd ||
++            connection->pending_remove || connection->close_after_write) {
++            continue;
++        }
++        size_t pending = connection->output_length - connection->output_offset;
++        if ((size_t) datalen > HTTPD_MAX_PENDING_OUTPUT - pending) {
++            connection->pending_remove = 1;
++            return -1;
++        }
++        if (pending && connection->output_offset) {
++            memmove(connection->output, connection->output + connection->output_offset, pending);
++        }
++        connection->output_length = pending;
++        connection->output_offset = 0;
++        char *output = realloc(connection->output, pending + (size_t) datalen);
++        if (!output) {
++            connection->pending_remove = 1;
++            return -1;
++        }
++        memcpy(output + pending, data, (size_t) datalen);
++        connection->output = output;
++        connection->output_length = pending + (size_t) datalen;
++        if (!pending) {
++            connection->output_progress_ms = httpd_now_ms();
++        }
++        return 0;
++    }
++    return -1;
++}
++
+ const char *
+ httpd_get_connection_typename (connection_type_t type) {
+   return typename[type];
+@@ -191,6 +286,9 @@
+     /* Initial status joined */
+     httpd->running = 0;
+     httpd->joined = 1;
++    httpd->server_fd4 = -1;
++    httpd->server_fd6 = -1;
++    MUTEX_CREATE(httpd->run_mutex);
+ 
+     return httpd;
+ }
+@@ -201,6 +299,7 @@
+     if (httpd) {
+         httpd_stop(httpd);
+         free(httpd->connections);
++        MUTEX_DESTROY(httpd->run_mutex);
+         free(httpd);
+     }
+ }
+@@ -244,6 +343,16 @@
+         httpd->open_connections--;
+     }
+     connection->type = CONNECTION_TYPE_UNKNOWN;
++    free(connection->output);
++    connection->output = NULL;
++    connection->output_length = 0;
++    connection->output_offset = 0;
++    connection->output_progress_ms = 0;
++    connection->close_after_write = false;
++    connection->prefix_length = 0;
++    connection->prefix_checked = false;
++    connection->reverse_stream = false;
++    connection->request_started_ms = 0;
+ }
+ 
+ static int
+@@ -274,7 +383,9 @@
+     httpd->connections[i].connected = 1;
+     httpd->connections[i].user_data = user_data;
+     httpd->connections[i].pending_remove = 0;
+-    httpd->connections[i].type = CONNECTION_TYPE_UNKNOWN;   //should not be necessary ...
++    httpd->connections[i].type = CONNECTION_TYPE_UNKNOWN;
++    /* A connection that never sends even its first request also expires. */
++    httpd->connections[i].request_started_ms = httpd_now_ms();
+     return 0;
+ }
+ 
+@@ -294,11 +405,18 @@
+     remote_saddrlen = sizeof(remote_saddr);
+     fd = accept(server_fd, (struct sockaddr *)&remote_saddr, &remote_saddrlen);
+     if (fd == -1) {
+-        /* FIXME: Error happened */
+         int sock_err = SOCKET_GET_ERROR();
++        if (httpd_retry_later(sock_err)) {
++            return 0;
++        }
+         logger_log(httpd->logger, LOGGER_ERR, "httpd: error in accept: %d %s",
+                    sock_err, SOCKET_ERROR_STRING(sock_err));
+         return -1;
++    }
++
++    if (httpd_nonblocking(fd) < 0) {
++        CLOSESOCKET(fd);
++        return 0;
+     }
+ 
+     local_saddrlen = sizeof(local_saddr);
+@@ -366,23 +484,117 @@
+     }
+ }
+ 
++static void
++httpd_read_data(httpd_t *httpd, http_connection_t *connection, const char *data, int datalen)
++{
++    int offset = 0;
++    while (offset < datalen && connection->connected && !connection->pending_remove) {
++        MUTEX_LOCK(httpd->run_mutex);
++        int running = httpd->running;
++        MUTEX_UNLOCK(httpd->run_mutex);
++        if (!running) {
++            return;
++        }
++        /* Replies to /event on a PTTH channel are consumed without accumulating
++           a request body or passing response syntax to the request parser. */
++        if (connection->reverse_stream || connection->type == CONNECTION_TYPE_PTTH) {
++            connection->reverse_stream = true;
++            connection->request_started_ms = 0;
++            return;
++        }
++        if (!connection->prefix_checked) {
++            if (!connection->request_started_ms) {
++                connection->request_started_ms = httpd_now_ms();
++            }
++            size_t needed = sizeof(connection->prefix) - connection->prefix_length;
++            size_t available = (size_t) (datalen - offset);
++            size_t take = needed < available ? needed : available;
++            memcpy(connection->prefix + connection->prefix_length, data + offset, take);
++            connection->prefix_length += take;
++            offset += (int) take;
++            if (connection->prefix_length < sizeof(connection->prefix)) {
++                return; /* The next readable event supplies the remaining prefix. */
++            }
++            if ((!memcmp(connection->prefix, "HTTP/1.", 7) &&
++                 (connection->prefix[7] == '0' || connection->prefix[7] == '1')) ||
++                !memcmp(connection->prefix, "EVENT/1.", 8)) {
++                connection->reverse_stream = true;
++                connection->request_started_ms = 0;
++                return;
++            }
++            connection->request = http_request_init();
++            if (!connection->request) {
++                httpd_remove_connection(httpd, connection, 0);
++                return;
++            }
++            connection->prefix_checked = true;
++            int consumed = http_request_add_data(connection->request, connection->prefix,
++                                                  (int) sizeof(connection->prefix));
++            if (consumed != sizeof(connection->prefix) || http_request_has_error(connection->request)) {
++                httpd_remove_connection(httpd, connection, 0);
++                return;
++            }
++            if (offset == datalen) {
++                return;
++            }
++        }
++
++        int consumed = http_request_add_data(connection->request, data + offset, datalen - offset);
++        if (consumed < 0 || http_request_has_error(connection->request)) {
++            logger_log(httpd->logger, LOGGER_ERR, "httpd request rejected: %s: %s",
++                       http_request_get_error_name(connection->request),
++                       http_request_get_error_description(connection->request));
++            httpd_remove_connection(httpd, connection, 0);
++            return;
++        }
++        offset += consumed;
++        if (!http_request_is_complete(connection->request)) {
++            if (!consumed) {
++                httpd_remove_connection(httpd, connection, 0);
++                return;
++            }
++            continue;
++        }
++
++        http_response_t *response = NULL;
++        httpd->callbacks.conn_request(connection->user_data, connection->request, &response);
++        http_request_destroy(connection->request);
++        connection->request = NULL;
++        connection->prefix_length = 0;
++        connection->prefix_checked = false;
++        connection->request_started_ms = 0;
++        if (response) {
++            int response_length = 0;
++            const char *response_data = http_response_get_data(response, &response_length);
++            bool disconnect = http_response_get_disconnect(response) || connection->pending_remove;
++            /* A teardown handler may mark its own connection. Preserve its
++               final reply, then close once those bytes have been sent. */
++            connection->pending_remove = 0;
++            int queued = httpd_queue_data(httpd, connection->socket_fd, response_data, response_length);
++            http_response_destroy(response);
++            if (queued < 0) {
++                httpd_remove_connection(httpd, connection, 0);
++                return;
++            }
++            connection->close_after_write = disconnect;
++            if (disconnect) {
++                return;
++            }
++        } else {
++            logger_log(httpd->logger, LOGGER_WARNING, "httpd didn't get response");
++        }
++    }
++}
++
+ static THREAD_RETVAL
+ httpd_thread(void *arg)
+ {
+     httpd_t *httpd = arg;
+-    char http[] = "HTTP/1.1";
+-    char event[] = "EVENT/1.0";
+-    char buffer[1024];
+-
+-    bool logger_debug = (logger_get_level(httpd->logger) >= LOGGER_DEBUG);
+-    assert(httpd);
+-
++    char buffer[4096];
+     while (1) {
+-        fd_set rfds;
++        fd_set rfds, wfds;
+         struct timeval tv;
+         int nfds = 0;
+-        int nfds_set = 0;
+-
+         MUTEX_LOCK(httpd->run_mutex);
+         if (!httpd->running) {
+             MUTEX_UNLOCK(httpd->run_mutex);
+@@ -391,251 +603,118 @@
+         int disconnect_clients = httpd->disconnect_clients_requested;
+         httpd->disconnect_clients_requested = 0;
+         MUTEX_UNLOCK(httpd->run_mutex);
+-        if (disconnect_clients) {
+-            /* Do not touch listening sockets or discovery; only end current sessions. */
+-            /* Pairing/control sockets may still have UNKNOWN type. They belong to
+-               the dismissed session too and must not keep its client count alive. */
+-            for (int i = 0; i < httpd->max_connections; i++) {
+-                if (httpd->connections[i].connected) {
+-                    httpd->connections[i].pending_remove = 1;
+-                }
+-            }
+-        }
+-
+-        /* Set timeout value to 5ms */
+-        tv.tv_sec = 1;
+-        tv.tv_usec = 5000;
+-
+-        /* Get the correct nfds value and set rfds */
++
+         FD_ZERO(&rfds);
++        FD_ZERO(&wfds);
++        uint64_t now = httpd_now_ms();
++        for (int i = 0; i < httpd->max_connections; i++) {
++            http_connection_t *connection = &httpd->connections[i];
++            if (!connection->connected) {
++                continue;
++            }
++            bool request_expired = connection->request_started_ms &&
++                now - connection->request_started_ms >= HTTPD_IO_TIMEOUT_MS;
++            bool output_expired = connection->output_length > connection->output_offset &&
++                now - connection->output_progress_ms >= HTTPD_IO_TIMEOUT_MS;
++            if (disconnect_clients || connection->pending_remove || request_expired || output_expired) {
++                httpd_remove_connection(httpd, connection, 0);
++                continue;
++            }
++            int fd = connection->socket_fd;
++            if (!connection->close_after_write) {
++                FD_SET(fd, &rfds);
++            }
++            if (connection->output_length > connection->output_offset) {
++                FD_SET(fd, &wfds);
++            }
++            if (nfds <= fd) nfds = fd + 1;
++        }
+         if (httpd->open_connections < httpd->max_connections) {
+             if (httpd->server_fd4 != -1) {
+                 FD_SET(httpd->server_fd4, &rfds);
+-                if (nfds <= httpd->server_fd4) {
+-                    nfds = httpd->server_fd4+1;
+-                }
++                if (nfds <= httpd->server_fd4) nfds = httpd->server_fd4 + 1;
+             }
+             if (httpd->server_fd6 != -1) {
+                 FD_SET(httpd->server_fd6, &rfds);
+-                if (nfds <= httpd->server_fd6) {
+-                    nfds = httpd->server_fd6+1;
+-                }
+-            }
+-        }
++                if (nfds <= httpd->server_fd6) nfds = httpd->server_fd6 + 1;
++            }
++        }
++        /* Poll only the stop flag/deadlines; network I/O is readiness driven. */
++        tv.tv_sec = 0;
++        tv.tv_usec = 100000;
++        int ready = select(nfds, &rfds, &wfds, NULL, &tv);
++        if (ready == 0) continue;
++        if (ready < 0) {
++            int error = SOCKET_GET_ERROR();
++            if (httpd_retry_later(error)) continue;
++            logger_log(httpd->logger, LOGGER_ERR, "httpd select error %d: %s",
++                       error, SOCKET_ERROR_STRING(error));
++            break;
++        }
++        MUTEX_LOCK(httpd->run_mutex);
++        int running = httpd->running;
++        MUTEX_UNLOCK(httpd->run_mutex);
++        if (!running) break;
++
++        /* Service each established socket at most once per readiness result. */
+         for (int i = 0; i < httpd->max_connections; i++) {
+-            int socket_fd;
+-            if (!httpd->connections[i].connected) {
+-                continue;
+-            }
+-            if (httpd->connections[i].pending_remove) {
+-                httpd_remove_connection(httpd, &httpd->connections[i], 0);
+-                continue;
+-            }
+-            socket_fd = httpd->connections[i].socket_fd;
+-            FD_SET(socket_fd, &rfds);
+-            if (nfds <= socket_fd) {
+-                nfds = socket_fd+1;
+-            }
+-        }
+-
+-        nfds_set = select(nfds, &rfds, NULL, NULL, &tv);
+-        if (nfds_set == 0) {
+-            /* Timeout happened */
+-            continue;
+-        } else if (nfds_set == -1) {
+-            int sock_err = SOCKET_GET_ERROR();
+-            logger_log(httpd->logger, LOGGER_ERR,
+-                       "httpd error in select: %d %s", sock_err, SOCKET_ERROR_STRING(sock_err));
+-            break;
+-        }
+-
+-        if (httpd->open_connections < httpd->max_connections &&
+-            httpd->server_fd4 != -1 && FD_ISSET(httpd->server_fd4, &rfds)) {
+-            int ret = httpd_accept_connection(httpd, httpd->server_fd4, 0);
+-            if (ret == -1) {
+-                logger_log(httpd->logger, LOGGER_ERR, "httpd error in accept ipv4");
+-                break;
+-            } else if (ret == 0) {
+-                continue;
+-            }
+-        }
+-        if (httpd->open_connections < httpd->max_connections &&
+-            httpd->server_fd6 != -1 && FD_ISSET(httpd->server_fd6, &rfds)) {
+-            int ret = httpd_accept_connection(httpd, httpd->server_fd6, 1);
+-            if (ret == -1) {
+-                logger_log(httpd->logger, LOGGER_ERR, "httpd error in accept ipv6");
+-                break;
+-            } else if (ret == 0) {
+-                continue;
+-            }
+-        }
+-        for (int i = 0; i < httpd->max_connections; i++) {
+-            int recv_datalen = 0;
+-            int new_request = 0;
+             http_connection_t *connection = &httpd->connections[i];
+-
+-            if (!connection->connected) {
+-                continue;
+-            }
+-            if (!FD_ISSET(connection->socket_fd, &rfds)) {
+-                continue;
+-            }
+-
+-            /* If not in the middle of request, allocate one */
+-            if (!connection->request) {
+-                connection->request = http_request_init();
+-                assert(connection->request);
+-                new_request = 1;
+-                if (connection->type == CONNECTION_TYPE_PTTH) {
+-                    http_request_is_reverse(connection->request);
+-                }
+-                logger_log(httpd->logger, LOGGER_DEBUG, "new request, connection %d, socket %d type %s",
+-                           i, connection->socket_fd, typename [connection->type]);
+-            } else {
+-                new_request = 0;
+-            }
+-
+-            logger_log(httpd->logger, LOGGER_DEBUG, "httpd receiving on socket %d, connection %d",
+-                       connection->socket_fd, i);
+-            if (logger_debug) {
+-                logger_log(httpd->logger, LOGGER_DEBUG,"\nhttpd: current connections:");
+-                for (int i = 0; i < httpd->max_connections; i++) {
+-                    http_connection_t *connection = &httpd->connections[i];
+-                    if (!connection->connected || !connection->socket_fd) {
++            if (!connection->connected || connection->pending_remove) continue;
++            int fd = connection->socket_fd;
++            if (FD_ISSET(fd, &wfds) && connection->output_length > connection->output_offset) {
++                int flags = 0;
++#ifdef MSG_NOSIGNAL
++                flags = MSG_NOSIGNAL;
++#endif
++                int sent = send(fd, connection->output + connection->output_offset,
++                                (int) (connection->output_length - connection->output_offset), flags);
++                if (sent > 0) {
++                    connection->output_offset += (size_t) sent;
++                    connection->output_progress_ms = httpd_now_ms();
++                    if (connection->output_offset == connection->output_length) {
++                        free(connection->output);
++                        connection->output = NULL;
++                        connection->output_length = 0;
++                        connection->output_offset = 0;
++                        connection->output_progress_ms = 0;
++                        if (connection->close_after_write) {
++                            httpd_remove_connection(httpd, connection, 0);
++                            continue;
++                        }
++                    }
++                } else if (sent == 0) {
++                    httpd_remove_connection(httpd, connection, 0);
++                    continue;
++                } else {
++                    int error = SOCKET_GET_ERROR();
++                    if (!httpd_retry_later(error)) {
++                        httpd_remove_connection(httpd, connection, error);
+                         continue;
+                     }
+-                    if (!FD_ISSET(connection->socket_fd, &rfds)) {
+-                        logger_log(httpd->logger, LOGGER_DEBUG, "connection %d type %d socket %d  conn %p %s", i,
+-                                   connection->type, connection->socket_fd,
+-                                   connection->user_data, typename [connection->type]);
+-                    } else {
+-                        logger_log(httpd->logger, LOGGER_DEBUG, "connection %d type %d socket %d  conn %p %s ACTIVE CONNECTION",
+-                                   i, connection->type, connection->socket_fd, connection->user_data, typename [connection->type]);
+-                    }
+                 }
+-                logger_log(httpd->logger, LOGGER_DEBUG, " ");
+-            }
+-            /* reverse-http responses from the client must not be sent to the llhttp parser:
+-             * such messages start with "HTTP/1.1" (or sometimes with "EVENT/1.0")  */
+-            if (new_request) {
+-                int readstart = 0;
+-                new_request = 0;
+-                while (readstart < 8) {
+-                    int ret = recv(connection->socket_fd, buffer + readstart, sizeof(buffer) - readstart, 0);
+-                    if (ret == 0) {
+-                        logger_log(httpd->logger, LOGGER_DEBUG, "client closed connection on socket %d",
+-                                   connection->socket_fd);
+-                        httpd_remove_connection(httpd, connection, 0);
+-                        break;
+-                    } else if (ret == -1) {
+-                        if (errno == SOCKET_ERRORNAME(EAGAIN) || errno == SOCKET_ERRORNAME(EWOULDBLOCK) || errno == SOCKET_ERRORNAME(EINTR)) {
+-                            continue;
+-                        } else {
+-                            httpd_remove_connection(httpd, connection, SOCKET_GET_ERROR());
+-                            break;
+-                        }
+-                    } else {
+-                        readstart += ret;
+-                        recv_datalen = readstart;
+-                    }
++            }
++            if (connection->close_after_write || !FD_ISSET(fd, &rfds)) continue;
++            int received = recv(fd, buffer, sizeof(buffer), 0);
++            if (received > 0) {
++                httpd_read_data(httpd, connection, buffer, received);
++            } else if (received == 0) {
++                httpd_remove_connection(httpd, connection, 0);
++            } else {
++                int error = SOCKET_GET_ERROR();
++                if (!httpd_retry_later(error)) {
++                    httpd_remove_connection(httpd, connection, error);
+                 }
+-                if (connection->socket_fd == -1) {
+-                    /* connection was removed */
+-                    continue;
+-                }
+-                if (!memcmp(buffer, http, 8) || !memcmp(buffer, event, 8)) {
+-                    http_request_set_reverse(connection->request);  
+-                }
+-            } else {
+-                int ret = recv(connection->socket_fd, buffer, sizeof(buffer), 0);
+-                if (ret == 0) {
+-                    httpd_remove_connection(httpd, connection, 0);
+-                    continue;
+-                } else if (ret == -1) {
+-                    if (errno == SOCKET_ERRORNAME(EAGAIN) || errno == SOCKET_ERRORNAME(EWOULDBLOCK) || errno == SOCKET_ERRORNAME(EINTR)) {
+-                        continue;
+-                    } else {
+-                        httpd_remove_connection(httpd, connection, SOCKET_GET_ERROR());
+-                        continue;
+-                    }
+-                } else {
+-                    recv_datalen = ret;
+-                }
+-            }
+-            if (http_request_is_reverse(connection->request)) {
+-                /* this is a response from the client to a
+-                 * GET /event reverse HTTP request from the server */
+-                if (recv_datalen && logger_debug) {
+-                    buffer[recv_datalen] = '\0';
+-                    logger_log(httpd->logger, LOGGER_INFO, "<<<< received response from client"
+-                               " (reversed HTTP = \"PTTH/1.0\") connection"
+-                               " on socket %d:\n%s\n", connection->socket_fd, buffer);
+-                }
+-                if (recv_datalen == 0) {
+-                    httpd_remove_connection(httpd, connection, 0);
+-                }
+-                continue;
+-            }
+-
+-            /* Parse HTTP request from data read from connection */
+-            http_request_add_data(connection->request, buffer, recv_datalen);
+-            if (http_request_has_error(connection->request)) {
+-                char *data = utils_data_to_text((const char *) buffer, recv_datalen);
+-                logger_log(httpd->logger, LOGGER_ERR, "httpd error in parsing: %s\n%s\n%s",
+-                           http_request_get_error_name(connection->request),
+-                           http_request_get_error_description(connection->request),
+-                           data);
+-                free (data);
+-                httpd_remove_connection(httpd, connection, 0);
+-                continue;
+-            }
+-
+-            /* If request is finished, process and deallocate */
+-            if (http_request_is_complete(connection->request)) {
+-                http_response_t *response = NULL;
+-                // Callback the received data to raop
+-                if (logger_debug) {
+-                    const char *method = http_request_get_method(connection->request);
+-                    const char *url = http_request_get_url(connection->request);
+-                    const char *protocol = http_request_get_protocol(connection->request);
+-                    logger_log(httpd->logger, LOGGER_INFO, "httpd request received on socket %d, "
+-                               "connection %d, method = %s, url = %s, protocol = %s",
+-                               connection->socket_fd, i, method, url, protocol);
+-                }
+-                httpd->callbacks.conn_request(connection->user_data, connection->request, &response);
+-                http_request_destroy(connection->request);
+-                connection->request = NULL;
+-
+-                if (response) {
+-                    const char *data;
+-                    int datalen;
+-                    int written;
+-                    int ret;
+-
+-                    /* Get response data and datalen */
+-                    data = http_response_get_data(response, &datalen);
+-
+-                    written = 0;
+-                    while (written < datalen) {
+-                        ret = send(connection->socket_fd, data+written, datalen-written, 0);
+-                        if (ret == -1) {
+-                            logger_log(httpd->logger, LOGGER_ERR, "httpd error in sending data");
+-                            break;
+-                        }
+-                        written += ret;
+-                    }
+-
+-                    if (http_response_get_disconnect(response)) {
+-                        logger_log(httpd->logger, LOGGER_INFO, "Disconnecting on software request");
+-                        httpd_remove_connection(httpd, connection, 0);
+-                    }
+-                } else {
+-                    logger_log(httpd->logger, LOGGER_WARNING, "httpd didn't get response");
+-                }
+-                http_response_destroy(response);
+-            } else {
+-                logger_log(httpd->logger, LOGGER_DEBUG, "Request not complete, waiting for more data...");
+-            }
++            }
++        }
++        /* Accept after servicing the old fd set, so reused descriptors cannot
++           inherit stale readiness bits from a connection closed above. */
++        if (httpd->open_connections < httpd->max_connections && httpd->server_fd4 != -1 &&
++            FD_ISSET(httpd->server_fd4, &rfds)) {
++            if (httpd_accept_connection(httpd, httpd->server_fd4, 0) < 0) break;
++        }
++        if (httpd->open_connections < httpd->max_connections && httpd->server_fd6 != -1 &&
++            FD_ISSET(httpd->server_fd6, &rfds)) {
++            if (httpd_accept_connection(httpd, httpd->server_fd6, 1) < 0) break;
+         }
+     }
+ 
+@@ -713,12 +792,31 @@
+         MUTEX_UNLOCK(httpd->run_mutex);
+         return -2;
+     }
++    if (httpd_nonblocking(httpd->server_fd4) < 0 ||
++        (httpd->server_fd6 != -1 && httpd_nonblocking(httpd->server_fd6) < 0)) {
++        CLOSESOCKET(httpd->server_fd4);
++        if (httpd->server_fd6 != -1) CLOSESOCKET(httpd->server_fd6);
++        httpd->server_fd4 = -1;
++        httpd->server_fd6 = -1;
++        MUTEX_UNLOCK(httpd->run_mutex);
++        return -2;
++    }
+     logger_log(httpd->logger, LOGGER_INFO, "Initialized server socket(s)");
+ 
+     /* Set values correctly and create new thread */
+     httpd->running = 1;
+     httpd->joined = 0;
+     THREAD_CREATE(httpd->thread, httpd_thread, httpd);
++    if (!httpd->thread) {
++        httpd->running = 0;
++        httpd->joined = 1;
++        CLOSESOCKET(httpd->server_fd4);
++        if (httpd->server_fd6 != -1) CLOSESOCKET(httpd->server_fd6);
++        httpd->server_fd4 = -1;
++        httpd->server_fd6 = -1;
++        MUTEX_UNLOCK(httpd->run_mutex);
++        return -3;
++    }
+     MUTEX_UNLOCK(httpd->run_mutex);
+ 
+     return 1;
+@@ -744,7 +842,7 @@
+     assert(httpd);
+ 
+     MUTEX_LOCK(httpd->run_mutex);
+-    if (!httpd->running || httpd->joined) {
++    if (httpd->joined) {
+         MUTEX_UNLOCK(httpd->run_mutex);
+         return;
+     }
+diff --git a/lib/fcup_request.h b/lib/fcup_request.h
+--- a/lib/fcup_request.h
++++ b/lib/fcup_request.h
+@@ -63,7 +63,9 @@
+     plist_to_xml(req_root_node, &plist_xml, &uint_val);
+     *datalen = (int) uint_val;
+     plist_free(req_root_node);
+-    assert(plist_xml[*datalen] == '\0');
++    if (!plist_xml) {
++        *datalen = 0;
++    }
+     return plist_xml; //needs to be freed after use
+ }
+ 
+@@ -80,9 +82,16 @@
+     
+     /* create xml plist request data */
+     char *plist_xml = create_fcup_request(media_url, request_id, client_session_id, &datalen);
++    if (!plist_xml) {
++        return -1;
++    }
+ 
+     /* use http_response tools for creating the reverse http request */
+     http_response_t *request = http_response_create();
++    if (!request) {
++        free(plist_xml);
++        return -1;
++    }
+     http_response_reverse_request_init(request, "POST", "/event", "HTTP/1.1");
+     http_response_add_header(request, "X-Apple-Session-ID", client_session_id);
+     http_response_add_header(request, "Content-Type", "text/x-apple-plist+xml");
+@@ -91,13 +100,9 @@
+     free(plist_xml);
+ 
+     const char *http_request = http_response_get_data(request, &requestlen); 
+-    int send_len = send(socket_fd, http_request, requestlen, 0);
+-    if (send_len < 0) {
+-        int sock_err = SOCKET_GET_ERROR();
+-	logger_log(raop->logger, LOGGER_ERR, "fcup_request: send  error %d:%s\n",
+-		 sock_err, SOCKET_ERROR_STRING(sock_err));
+-	http_response_destroy(request);
+-        /* shut down connection? */
++    if (httpd_queue_data(raop->httpd, socket_fd, http_request, requestlen) < 0) {
++        logger_log(raop->logger, LOGGER_ERR, "fcup_request: unable to queue reverse request");
++        http_response_destroy(request);
+         return -1;
+     }
+ 
+@@ -107,7 +112,7 @@
+         free (request_str);
+     }
+     http_response_destroy(request);
+-    logger_log(raop->logger, LOGGER_DEBUG,"fcup_request: send sent Request of %d bytes from socket %d\n",
+-               send_len, socket_fd);
++    logger_log(raop->logger, LOGGER_DEBUG, "fcup_request: queued %d bytes on socket %d",
++               requestlen, socket_fd);
+     return 0;
+ }
+diff --git a/lib/http_handlers.h b/lib/http_handlers.h
+--- a/lib/http_handlers.h
++++ b/lib/http_handlers.h
+@@ -185,7 +185,9 @@
+         /* verify that this request contains a binary plist*/
+         char *header_str = NULL;
+         int request_datalen = 0;
+-        http_request_get_header_string(request, &header_str);
++        if (http_request_get_header_string(request, &header_str) < 0) {
++            goto post_error;
++        }
+         bool is_plist = strstr(header_str,"apple-binary-plist");
+         free(header_str);
+         if (!is_plist) {
+@@ -492,7 +494,9 @@
+ 
+     /* verify that this request contains a binary plist*/
+     char *header_str = NULL;
+-    http_request_get_header_string(request, &header_str);
++    if (http_request_get_header_string(request, &header_str) < 0) {
++        goto post_action_error;
++    }
+     logger_log(raop->logger, LOGGER_DEBUG, "request header: %s", header_str);
+     data_is_plist = (strstr(header_str,"apple-binary-plist") != NULL);
+     free(header_str);
+@@ -775,7 +779,9 @@
+     }
+ 
+     char *header_str = NULL;
+-    http_request_get_header_string(request, &header_str);
++    if (http_request_get_header_string(request, &header_str) < 0) {
++        goto play_error;
++    }
+     logger_log(raop->logger, LOGGER_DEBUG, "request header:\n%s", header_str);
+     data_is_binary_plist = (strstr(header_str, "x-apple-binary-plist") != NULL);
+     free (header_str);
+@@ -1028,7 +1034,7 @@
+         char *header_str = NULL;
+         http_request_get_header_string(request, &header_str);
+         logger_log(raop->logger, LOGGER_INFO,
+-                   "%s\nhls upgrade request declined", header_str); 
++                   "%s\nhls upgrade request declined", header_str ? header_str : ""); 
+         free (header_str);
+         return;
+     }
+diff --git a/lib/raop_handlers.h b/lib/raop_handlers.h
+--- a/lib/raop_handlers.h
++++ b/lib/raop_handlers.h
+@@ -286,7 +286,9 @@
+     logger_log(raop->logger, LOGGER_INFO, "client requested pair-setup-pin, datalen = %d", request_datalen);
+     if (request_datalen > 0) {
+         char *header_str= NULL; 
+-        http_request_get_header_string(request, &header_str);
++        if (http_request_get_header_string(request, &header_str) < 0) {
++            goto authentication_failed;
++        }
+         logger_log(raop->logger, LOGGER_INFO, "request header: %s", header_str);
+         data_is_plist = (strstr(header_str,"apple-binary-plist") != NULL);
+         free(header_str);

@@ -32,6 +32,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import io.github.jqssun.airplay.service.AirPlayService
 import io.github.jqssun.airplay.ui.MainScreen
+import io.github.jqssun.airplay.ui.PairingPinDialog
 import io.github.jqssun.airplay.ui.AppUpdateDialog
 import io.github.jqssun.airplay.ui.AutoLaunchPermissionDialog
 import io.github.jqssun.airplay.onboarding.AutoLaunchOnboarding
@@ -84,6 +85,7 @@ class MainActivity : ComponentActivity() {
             svc.logCallback = logCallback
             svc.pinCallback = pinCallback
             viewModel.bindService(svc)
+            viewModel.showPin(svc.currentPin)
             if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) _refreshForeground()
             _autoStart()
         }
@@ -200,6 +202,9 @@ class MainActivity : ComponentActivity() {
                     updateLabel = updateState.entryLabel,
                     onOpenUpdates = updateViewModel::open
                 )
+                if (!isInPip.value) {
+                    PairingPinDialog(pin = pin, onDismiss = viewModel::dismissPin)
+                }
                 AppUpdateDialog(
                     state = updateState.copy(dialogVisible = updateState.dialogVisible && !casting && pin == null),
                     onDismiss = updateViewModel::dismiss,

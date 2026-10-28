@@ -25,7 +25,6 @@ class UpdatePackageException(val userMessage: String, cause: Throwable? = null) 
  */
 class UpdatePackageVerifier(context: Context) {
     private val context = context.applicationContext
-    private val preparation = Mutex()
 
     suspend fun prepare(downloadedFile: File, release: UpdateRelease): File =
         withContext(Dispatchers.IO) {
@@ -189,6 +188,9 @@ class UpdatePackageVerifier(context: Context) {
     }
 
     private companion object {
+        // Activity recreation can briefly overlap old and new verifier instances.
+        // They share the same pending/prepared files, so serialize across instances.
+        val preparation = Mutex()
         const val MAX_APK_BYTES = 256L * 1024 * 1024
         const val STORAGE_MARGIN_BYTES = 1024L * 1024
         const val OLD_FILE_AGE_MS = 24L * 60 * 60 * 1000

@@ -1,0 +1,35 @@
+diff --git a/lib/raop_handlers.h b/lib/raop_handlers.h
+--- a/lib/raop_handlers.h
++++ b/lib/raop_handlers.h
+@@ -779,7 +779,14 @@
+         }
+ 
+         plist_get_data_val(req_eiv_node, &eiv, &eiv_len);
+-        memcpy(aesiv, eiv, 16);
++        if (!eiv || eiv_len != sizeof(aesiv)) {
++            free(eiv);
++            plist_free(res_root_node);
++            plist_free(req_root_node);
++            http_response_init(response, "RTSP/1.0", 400, "Bad Request");
++            return;
++        }
++        memcpy(aesiv, eiv, sizeof(aesiv));
+         free(eiv);	
+         logger_log(raop->logger, LOGGER_DEBUG, "eiv_len = %llu", eiv_len);
+         if (logger_debug) {
+@@ -791,7 +798,14 @@
+         char* ekey = NULL;
+         uint64_t ekey_len = 0;
+         plist_get_data_val(req_ekey_node, &ekey, &ekey_len);
+-        memcpy(eaeskey,ekey,72);
++        if (!ekey || ekey_len != sizeof(eaeskey)) {
++            free(ekey);
++            plist_free(res_root_node);
++            plist_free(req_root_node);
++            http_response_init(response, "RTSP/1.0", 400, "Bad Request");
++            return;
++        }
++        memcpy(eaeskey, ekey, sizeof(eaeskey));
+         free(ekey);
+         logger_log(raop->logger, LOGGER_DEBUG, "ekey_len = %llu", ekey_len);
+         // eaeskey is 72 bytes, aeskey is 16 bytes

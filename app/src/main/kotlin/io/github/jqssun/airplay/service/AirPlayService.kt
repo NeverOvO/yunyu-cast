@@ -11,6 +11,7 @@ import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioManager
 import android.net.ConnectivityManager
@@ -61,6 +62,7 @@ import io.github.jqssun.airplay.renderer.AirPlayVideoPlayer
 import io.github.jqssun.airplay.renderer.AudioRenderer
 import io.github.jqssun.airplay.renderer.VideoRenderer
 import io.github.jqssun.airplay.viewmodel.DebugInfo
+import java.io.ByteArrayOutputStream
 import java.net.NetworkInterface
 import java.util.concurrent.Executors
 import java.util.concurrent.FutureTask
@@ -255,6 +257,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     var logCallback: ((String) -> Unit)? = null
 
     @Volatile private var _lastPin: String? = null
+    val currentPin: String? get() = _lastPin
     var pinCallback: ((String?) -> Unit)? = null
         set(value) {
             field = value
@@ -395,7 +398,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         airPlayVideoPlayer.onEnded = { _endVideoPlayback("AirPlay Video stopped (player)") }
         airPlayVideoPlayer.onPlaybackInfo = { snapshot ->
             if (nativeHandle != 0L && !dlnaOwnsPlayer) {
-                NativeBridge.nativeUpdatePlaybackInfo(nativeHandle, snapshot.position, snapshot.duration, snapshot.rate, snapshot.ready)
+                NativeBridge.nativeUpdatePlaybackInfo(nativeHandle, snapshot.position, snapshot.duration,
+                    snapshot.rate, snapshot.ready, snapshot.playWhenReady)
             }
             if (dlnaOwnsPlayer && _videoPlaybackActive.value) {
                 dlnaState = when {
@@ -1295,12 +1299,29 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     override fun onCoverArt(data: ByteArray) {
         // Keep image decoding off the main thread; capture the session before decoding.
-        if (!acceptingNativeCallbacks || isClosingAirPlay()) return
+        if (!acceptingNativeCallbacks || isClosingAirPlay() || data.size > MAX_COVER_ART_BYTES) return
         val generation = sessionExitGeneration
-        val bmp = BitmapFactory.decodeByteArray(data, 0, data.size) ?: return
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(data, 0, data.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return
+        var sampleSize = 1
+        while ((bounds.outWidth.toLong() + sampleSize - 1) / sampleSize > MAX_COVER_ART_EDGE ||
+            (bounds.outHeight.toLong() + sampleSize - 1) / sampleSize > MAX_COVER_ART_EDGE) {
+            sampleSize *= 2
+        }
+        val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        val bmp = BitmapFactory.decodeByteArray(data, 0, data.size, options) ?: return
+        // Media3 artwork consumers must receive the same bounded image, not the original.
+        val artworkBytes = ByteArrayOutputStream().use { output ->
+            if (!bmp.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                bmp.recycle()
+                return
+            }
+            output.toByteArray()
+        }
         postNativeState {
             if (generation != sessionExitGeneration) return@postNativeState
-            _coverArtBytes = data
+            _coverArtBytes = artworkBytes
             _trackInfo.value = _trackInfo.value.copy(coverArt = bmp)
             _updateMediaMetadata()
             _refreshDacpPlayer()
@@ -1309,9 +1330,11 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     override fun onProgress(start: Long, curr: Long, end: Long) {
         postNativeState {
-            val rate = 44100.0
-            val posMs = ((curr - start) / rate * 1000).toLong().coerceAtLeast(0)
-            val durMs = ((end - start) / rate * 1000).toLong().coerceAtLeast(0)
+            // RAOP reports unsigned 32-bit sample timestamps, including across rollover.
+            val durationSamples = (end - start) and 0xffff_ffffL
+            val positionSamples = ((curr - start) and 0xffff_ffffL).coerceAtMost(durationSamples)
+            val posMs = positionSamples * 1000 / 44100
+            val durMs = durationSamples * 1000 / 44100
             // pause/resume transitions emit degenerate progress; keep the last good value
             if (durMs <= 0) return@postNativeState
             _positionMs.value = posMs
@@ -1399,6 +1422,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     private fun _setPlaying(playing: Boolean) {
+        val positionBeforeChange = currentPositionMs()
         _playing.value = playing
         _refreshDacpPlayer()
         if (playing) {
@@ -1407,7 +1431,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             _progressBaseTime = SystemClock.elapsedRealtime()
         } else {
             // freeze position
-            _positionMs.value = currentPositionMs()
+            _positionMs.value = positionBeforeChange
             _progressBaseTime = 0
         }
         _updatePlaybackState()
@@ -1662,6 +1686,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         // shared with dpad/double-tap seeks
         const val VIDEO_SEEK_STEP_MS = 10_000L
         const val VIDEO_POLL_PENDING_TIMEOUT_MS = 3_000L
+        private const val MAX_COVER_ART_BYTES = 8 * 1024 * 1024
+        private const val MAX_COVER_ART_EDGE = 1024
 
         private const val AUDIO_CONFIG_DEBOUNCE_MS = 500L
         private const val SERVER_RESTART_DEBOUNCE_MS = 500L

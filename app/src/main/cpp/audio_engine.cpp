@@ -73,27 +73,24 @@ struct AudioEngine {
 
     bool start() {
         std::lock_guard<std::mutex> lk(mRebuildLock);
+        if (!mRunning) mOutputRetryAtNs = 0;
         mRunning = true;
-        if (mOutput && !mOutputActive) {
-            mTimeline->flushAndReprime();
-            mOutputActive = mOutput->start();
-        }
-        return mOutputActive;
+        return startOutputLocked();
     }
 
     void pause() {
         std::lock_guard<std::mutex> lk(mRebuildLock);
         mRunning = false;
-        if (mOutput && mOutputActive) {
-            mOutput->stop();
-            mOutputActive = false;
-        }
+        if (mOutput) mOutput->stop();
+        mOutputRetryAtNs = 0;
     }
 
     // touches decoder: must not run concurrently with decode()
     void stop() {
+        std::lock_guard<std::mutex> lk(mRebuildLock);
+        mRunning = false;
         if (mOutput) mOutput->stop();
-        mOutputActive = false;
+        mOutputRetryAtNs = 0;
         mDecoder = {};
     }
 
@@ -152,11 +149,19 @@ struct AudioEngine {
                 std::unique_ptr<AudioConfig> c(raw);
                 mDecoder = {};
                 std::lock_guard<std::mutex> lk(mRebuildLock);
-                if (mOutputActive) mOutput->stop();
+                if (mOutput) mOutput->stop();
                 mOutput.reset();
                 initInternals(*c);
-                mOutputActive = mRunning ? mOutput->start() : false;
+                mOutputRetryAtNs = 0;
+                startOutputLocked();
             }
+        }
+
+        // Device loss can happen after a successful start. Query the output's
+        // current identity instead of trusting a cached success bit forever.
+        if (mOutput && !mOutput->isActive()) {
+            std::lock_guard<std::mutex> lk(mRebuildLock);
+            startOutputLocked();
         }
 
         const int ci = ctIndex(ct);
@@ -174,11 +179,34 @@ struct AudioEngine {
                                     mApplied->preferInProcessAac, mApplied->realtimePriority, mApplied->lowLatency)};
             mRetryAtNs = mDecoder.decoder ? 0 : monoNs() + DECODER_RETRY_NS;
         }
-        if (mDecoder.decoder && !mDecoder.decoder->decode(data, len, ptsNs))
-            mDecodeErrors.fetch_add(1, std::memory_order_relaxed);
+        if (mDecoder.decoder) {
+            if (!mDecoder.decoder->decode(data, len, ptsNs))
+                mDecodeErrors.fetch_add(1, std::memory_order_relaxed);
+            const int32_t fatal = mDecoder.decoder->fatalError();
+            if (fatal != 0) {
+                // Destruction joins the old MediaCodec drain worker before the
+                // producer resets the timeline or creates its replacement.
+                mDecoder.decoder.reset();
+                mTimeline->resetForDiscontinuity();
+                mDecLatency.setHeld(0);
+                // Keep ct/format: clearing them would bypass backoff as a format change.
+                mRetryAtNs = monoNs() + DECODER_RETRY_NS;
+                mLog->warn("Audio decoder failed during playback (%d); retrying in 1 second", fatal);
+            }
+        }
     }
 
 private:
+    bool startOutputLocked() {
+        if (!mRunning || !mOutput) return false;
+        if (mOutput->isActive()) return true;
+        if (monoNs() < mOutputRetryAtNs) return false;
+        const bool active = mOutput->start();
+        // Also rate-limit a stream that starts successfully then immediately fails.
+        mOutputRetryAtNs = monoNs() + OUTPUT_RETRY_NS;
+        return active;
+    }
+
     static int ctIndex(int ct) {
         switch (ct) {
             case CT_ALAC:    return 0;
@@ -211,7 +239,8 @@ private:
     std::shared_ptr<TimelineBuffer> mTimeline; // guarded by mRebuildLock
     std::shared_ptr<AudioOutput> mOutput;      // guarded by mRebuildLock
     bool mRunning = false;                     // requested output state, guarded by mRebuildLock
-    bool mOutputActive = false;                // actual output state, guarded by mRebuildLock
+    static constexpr int64_t OUTPUT_RETRY_NS = 1'000'000'000LL;
+    int64_t mOutputRetryAtNs = 0;               // guarded by mRebuildLock
     float mClientGain = 1.0f;                  // last-set sender gain, guarded by mRebuildLock
 
     LatencyReporter mDecLatency{"decode", *mLog};

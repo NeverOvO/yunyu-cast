@@ -91,6 +91,9 @@ public:
     virtual ~Decoder() = default;
     // called on RAOP receive thread; returns false = non-critical decode error
     virtual bool decode(const uint8_t *data, size_t len, int64_t ptsNs) = 0;
+    // A nonzero platform error requires retirement on the producer thread. Packet
+    // corruption/backpressure alone must not repeatedly recreate a healthy decoder.
+    virtual int32_t fatalError() const { return 0; }
     // Same producer thread as decode(); flushes the decoder and producer timeline.
     // False asks the engine to destroy the decoder before resetting the timeline.
     virtual bool flush() = 0;
@@ -183,24 +186,30 @@ public:
     }
 
     bool decode(const uint8_t *data, size_t len, int64_t ptsNs) override {
+        if (fatalError() != 0) return false;
         ssize_t ii = AMediaCodec_dequeueInputBuffer(mCodec, 5000);
-        if (ii < 0) return false;
+        if (ii == AMEDIACODEC_INFO_TRY_AGAIN_LATER) return false;
+        if (ii < 0) { fail((int32_t)ii); return false; }
         size_t cap = 0;
         uint8_t *in = AMediaCodec_getInputBuffer(mCodec, (size_t)ii, &cap);
-        if (!in) return false;
+        if (!in) { fail(AMEDIA_ERROR_UNKNOWN); return false; }
         const size_t n = len < cap ? len : cap;
         memcpy(in, data, n);
         mProbe.record((int64_t)(ptsNs / 1000), monoNs());
         // still queue packets that are too large, but truncate them and report as error
-        return AMediaCodec_queueInputBuffer(mCodec, (size_t)ii, 0, n, (uint64_t)(ptsNs / 1000), 0) ==
-                   AMEDIA_OK && n == len;
+        const media_status_t status = AMediaCodec_queueInputBuffer(
+            mCodec, (size_t)ii, 0, n, (uint64_t)(ptsNs / 1000), 0);
+        if (status != AMEDIA_OK) fail((int32_t)status);
+        return status == AMEDIA_OK && n == len;
     }
+
+    int32_t fatalError() const override { return mFatalError.load(std::memory_order_acquire); }
 
     bool flush() override {
         stopDrain();
         // A flush before the first output/format change can discard codec-specific
         // data on Android. Recreate with the original CSD instead in that case.
-        if (!mOutputEstablished || AMediaCodec_flush(mCodec) != AMEDIA_OK) return false;
+        if (fatalError() != 0 || !mOutputEstablished || AMediaCodec_flush(mCodec) != AMEDIA_OK) return false;
         mProbe.reset();
         mLat.setHeld(0);
         mTimeline.resetForDiscontinuity();
@@ -210,6 +219,13 @@ public:
 
 private:
     static constexpr int64_t DRAIN_TIMEOUT_US = 20000;
+
+    void fail(int32_t error) {
+        int32_t expected = 0;
+        mFatalError.compare_exchange_strong(expected, error, std::memory_order_release);
+        // Never join or rebuild from the drain worker itself.
+        mDrainRun.store(false, std::memory_order_relaxed);
+    }
 
     void startDrain() {
         mDrainRun.store(true, std::memory_order_relaxed);
@@ -225,18 +241,30 @@ private:
         AMediaCodecBufferInfo info;
         while (mDrainRun.load(std::memory_order_relaxed)) {
             ssize_t oi = AMediaCodec_dequeueOutputBuffer(mCodec, &info, DRAIN_TIMEOUT_US);
-            if (oi == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) mOutputEstablished = true;
-            if (oi < 0) continue;  // timeout / format / buffers changed
+            if (oi == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
+                mOutputEstablished = true;
+                continue;
+            }
+            if (oi == AMEDIACODEC_INFO_TRY_AGAIN_LATER || oi == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED)
+                continue;
+            if (oi < 0) { fail((int32_t)oi); break; }
             mOutputEstablished = true;
             size_t osz = 0;
             uint8_t *out = AMediaCodec_getOutputBuffer(mCodec, (size_t)oi, &osz);
+            if (info.offset < 0 || info.size < 0 || (size_t)info.offset > osz ||
+                (size_t)info.size > osz - (size_t)info.offset || (!out && info.size > 0)) {
+                AMediaCodec_releaseOutputBuffer(mCodec, (size_t)oi, false);
+                fail(AMEDIA_ERROR_UNKNOWN);
+                break;
+            }
             if (out && info.size > 0) {
                 mTimeline.write((const int16_t *)(out + info.offset),
                                 (size_t)info.size / sizeof(int16_t),
                                 (int64_t)info.presentationTimeUs * 1000);
             }
             const int64_t nowNs = monoNs();
-            AMediaCodec_releaseOutputBuffer(mCodec, (size_t)oi, false);
+            const media_status_t released = AMediaCodec_releaseOutputBuffer(mCodec, (size_t)oi, false);
+            if (released != AMEDIA_OK) { fail((int32_t)released); break; }
             const int64_t lat = mProbe.match((int64_t)info.presentationTimeUs, nowNs);
             if (lat >= 0) mLat.record(lat);
             mLat.setHeld(mProbe.inFlight());
@@ -249,6 +277,7 @@ private:
     LatencyProbe mProbe;
     std::thread mDrainThread;
     std::atomic<bool> mDrainRun{false};
+    std::atomic<int32_t> mFatalError{0};
     bool mOutputEstablished = false; // drain thread; flush reads only after join
 };
 

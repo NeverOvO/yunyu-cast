@@ -73,6 +73,7 @@ void android_callbacks_init(android_callback_ctx_t *ctx, JNIEnv *env, jobject ca
     ctx->playback_duration = 0.0;
     ctx->playback_rate = 0.0f;
     ctx->playback_ready = 0;
+    ctx->playback_play_when_ready = 0;
 
     jclass cls = (*env)->GetObjectClass(env, callback_obj);
     ctx->on_video_data = (*env)->GetMethodID(env, cls, "onVideoData", "([BJZ)V");
@@ -121,12 +122,13 @@ void android_callbacks_interrupt_playback_wait(android_callback_ctx_t *ctx, int 
 }
 
 void android_callbacks_update_playback_info(android_callback_ctx_t *ctx, double position,
-                                             double duration, float rate, int ready) {
+                                             double duration, float rate, int ready, int play_when_ready) {
     pthread_mutex_lock(&ctx->playback_info_lock);
     ctx->playback_position = position;
     ctx->playback_duration = duration;
     ctx->playback_rate = rate;
     ctx->playback_ready = ready;
+    ctx->playback_play_when_ready = play_when_ready;
     /* A terminal/error snapshot must release a held direct-URL /play too.
        Keep playback_ready false: this wakes the waiter without claiming success. */
     if ((ready || duration < 0.0) && !ctx->play_ready) {
@@ -172,6 +174,7 @@ static void _conn_init(void *cls) {
         ctx->playback_duration = 0.0;
         ctx->playback_rate = 0.0f;
         ctx->playback_ready = 0;
+        ctx->playback_play_when_ready = 0;
     }
     pthread_mutex_unlock(&ctx->playback_info_lock);
     JNIEnv *env = _get_env(ctx);
@@ -244,9 +247,10 @@ static void _video_reset(void *cls, reset_type_t t) {
         _video_stop(cls);
     }
     if (t == RESET_TYPE_HLS_CONN_CLOSED) {
-        /* abandoned only if paused and ready: rate alone is also 0 while buffering */
+        /* Buffering has zero effective rate even after a VOD timeline is ready.
+           Only an explicit paused intent can mark this connection abandoned. */
         pthread_mutex_lock(&ctx->playback_info_lock);
-        int paused = ctx->playback_ready && ctx->playback_rate <= 0.0f;
+        int paused = ctx->playback_ready && !ctx->playback_play_when_ready;
         pthread_mutex_unlock(&ctx->playback_info_lock);
         if (paused) {
             _video_stop(cls);
@@ -279,7 +283,7 @@ static double _audio_set_client_volume(void *cls) {
 static void _audio_set_metadata(void *cls, const void *buf, int len) {
     android_callback_ctx_t *ctx = (android_callback_ctx_t *)cls;
     JNIEnv *env = _get_env(ctx);
-    if (!env || !buf || len <= 0) return;
+    if (!env || !buf || len <= 0 || len > 1024 * 1024) return;
     jbyteArray arr = (*env)->NewByteArray(env, len);
     if (!arr) return;
     (*env)->SetByteArrayRegion(env, arr, 0, len, (jbyte *)buf);
@@ -290,7 +294,7 @@ static void _audio_set_metadata(void *cls, const void *buf, int len) {
 static void _audio_set_coverart(void *cls, const void *buf, int len) {
     android_callback_ctx_t *ctx = (android_callback_ctx_t *)cls;
     JNIEnv *env = _get_env(ctx);
-    if (!env || !buf || len <= 0) return;
+    if (!env || !buf || len <= 0 || len > 8 * 1024 * 1024) return;
     jbyteArray arr = (*env)->NewByteArray(env, len);
     if (!arr) return;
     (*env)->SetByteArrayRegion(env, arr, 0, len, (jbyte *)buf);

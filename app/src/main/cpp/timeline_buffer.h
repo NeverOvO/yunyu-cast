@@ -6,19 +6,23 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 
 #include "audio_time.h"
 
 /*
- * lock-free SPSC ring of int16 samples (interleaved frames); positions are
- * non-wrapping 64-bit counters so empty/full are unambiguous without spare slot
+ * lock-free SPSC ring of int16 samples (interleaved frames). Native-width unsigned
+ * positions may wrap; power-of-two storage keeps indexing continuous across that
+ * wrap on ARM32 as well as ARM64. The requested logical capacity remains unchanged.
  */
 class SpscRing {
 public:
     explicit SpscRing(size_t capacitySamples)
-        : mCapacity(capacitySamples), mBuf(new int16_t[capacitySamples]) {}
+        : mCapacity(capacitySamples), mStorageCapacity(storageCapacity(capacitySamples)),
+          mBuf(new int16_t[mStorageCapacity]) {}
 
     size_t available() const {  // samples readable
         return mWrite.load(std::memory_order_acquire) - mRead.load(std::memory_order_acquire);
@@ -33,8 +37,8 @@ public:
         const size_t r = mRead.load(std::memory_order_acquire);
         const size_t freeSpace = mCapacity - (w - r);
         if (n > freeSpace) n = freeSpace;
-        const size_t wi = w % mCapacity;
-        const size_t first = (n < mCapacity - wi) ? n : (mCapacity - wi);
+        const size_t wi = w & (mStorageCapacity - 1);
+        const size_t first = std::min(n, mStorageCapacity - wi);
         memcpy(&mBuf[wi], src, first * sizeof(int16_t));
         if (n > first) memcpy(&mBuf[0], src + first, (n - first) * sizeof(int16_t));
         mWrite.store(w + n, std::memory_order_release);
@@ -47,8 +51,8 @@ public:
         const size_t w = mWrite.load(std::memory_order_acquire);
         const size_t avail = w - r;
         if (n > avail) n = avail;
-        const size_t ri = r % mCapacity;
-        const size_t first = (n < mCapacity - ri) ? n : (mCapacity - ri);
+        const size_t ri = r & (mStorageCapacity - 1);
+        const size_t first = std::min(n, mStorageCapacity - ri);
         memcpy(dst, &mBuf[ri], first * sizeof(int16_t));
         if (n > first) memcpy(dst + first, &mBuf[0], (n - first) * sizeof(int16_t));
         mRead.store(r + n, std::memory_order_release);
@@ -74,7 +78,17 @@ public:
     }
 
 private:
+    static size_t storageCapacity(size_t requested) {
+        // Keep all occupied/boundary distances below half the counter range.
+        if (requested > std::numeric_limits<size_t>::max() / 2)
+            throw std::length_error("Audio ring capacity is too large");
+        size_t capacity = 1;
+        while (capacity < requested) capacity <<= 1;
+        return capacity;
+    }
+
     const size_t mCapacity;
+    const size_t mStorageCapacity;
     std::unique_ptr<int16_t[]> mBuf;
     std::atomic<size_t> mWrite{0};
     std::atomic<size_t> mRead{0};

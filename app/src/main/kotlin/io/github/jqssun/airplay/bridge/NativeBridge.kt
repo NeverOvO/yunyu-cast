@@ -30,7 +30,8 @@ object NativeBridge {
     external fun nativeSetLang(handle: Long, lang: String)
     external fun nativeSetFeature(handle: Long, bit: Int, enabled: Boolean)
     external fun nativeUpdatePlaybackInfo(
-        handle: Long, position: Float, duration: Float, rate: Float, readyToPlay: Boolean
+        handle: Long, position: Float, duration: Float, rate: Float, readyToPlay: Boolean,
+        playWhenReady: Boolean
     )
 
     external fun nativeGetRaopTxtRecords(handle: Long): Map<String, String>?

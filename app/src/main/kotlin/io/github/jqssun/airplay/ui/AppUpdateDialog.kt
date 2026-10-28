@@ -1,6 +1,8 @@
 package io.github.jqssun.airplay.ui
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -12,6 +14,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -21,6 +30,7 @@ import androidx.compose.ui.window.DialogProperties
 import io.github.jqssun.airplay.R
 import io.github.jqssun.airplay.update.AppUpdateState
 import io.github.jqssun.airplay.update.UpdatePhase
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 /** A single, remote-friendly decision at every stage of a user-requested update. */
@@ -39,6 +49,18 @@ fun AppUpdateDialog(
     val phase = state.phase
     val primaryFocus = remember { FocusRequester() }
     val closeFocus = remember { FocusRequester() }
+    val detailsScroll = rememberScrollState()
+    val scrollScope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    // Read the activity window before entering Dialog: a wrapping dialog can be
+    // measured taller than the visible screen on some Android TV versions.
+    val windowHeight = LocalWindowInfo.current.containerSize.height
+    val safeInsets = WindowInsets.safeDrawing
+    val availableHeight = with(density) {
+        (windowHeight - safeInsets.getTop(this) - safeInsets.getBottom(this))
+            .coerceAtLeast(0).toDp()
+    }
+    val scrollStep = with(density) { 80.dp.toPx() }
     val primaryLabel = when (phase) {
         UpdatePhase.IDLE -> "检查更新"
         UpdatePhase.UP_TO_DATE -> "知道了"
@@ -75,6 +97,7 @@ fun AppUpdateDialog(
     }
     val highlights = remember(state.release?.notes) { firstUpdateParagraph(state.release?.notes.orEmpty()) }
     LaunchedEffect(phase) {
+        detailsScroll.scrollTo(0)
         if (primaryLabel == null) closeFocus.requestFocusUntilLanded()
         else primaryFocus.requestFocusUntilLanded()
     }
@@ -84,7 +107,8 @@ fun AppUpdateDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         BoxWithConstraints(
-            Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp),
+            Modifier.fillMaxWidth().heightIn(max = availableHeight)
+                .padding(horizontal = 24.dp, vertical = 20.dp),
             contentAlignment = Alignment.Center,
         ) {
             Surface(
@@ -94,53 +118,74 @@ fun AppUpdateDialog(
                 contentColor = Color.White,
             ) {
                 Column(
-                    Modifier.verticalScroll(rememberScrollState()).padding(28.dp),
+                    Modifier.padding(28.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    // Keep actions visible; the remote can focus and scroll the
+                    // details without moving the whole dialog off the screen.
+                    Column(
+                        Modifier.weight(1f, fill = false)
+                            .dpadFocus(RoundedCornerShape(12.dp))
+                            .onPreviewKeyEvent { event ->
+                                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                                val delta = when {
+                                    event.key == Key.DirectionUp && detailsScroll.canScrollBackward -> -scrollStep
+                                    event.key == Key.DirectionDown && detailsScroll.canScrollForward -> scrollStep
+                                    else -> return@onPreviewKeyEvent false
+                                }
+                                scrollScope.launch { detailsScroll.scrollBy(delta) }
+                                true
+                            }
+                            .focusable(enabled = detailsScroll.maxValue > 0)
+                            .verticalScroll(detailsScroll)
+                            .padding(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(18.dp),
                     ) {
-                        Image(painterResource(R.drawable.yunyu_mark), null, Modifier.size(64.dp))
-                        Text(title, color = Color.White, fontSize = 28.sp, lineHeight = 36.sp,
-                            fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                    }
-                    Text(
-                        if (state.release == null) "当前版本  ${state.installedVersion}"
-                        else "当前版本  ${state.installedVersion}\n新版本  ${state.release.versionName}",
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        fontSize = 20.sp, lineHeight = 30.sp,
-                    )
-                    Text(explanation, color = if (phase == UpdatePhase.ERROR) MaterialTheme.colorScheme.error else Color.White,
-                        fontSize = 20.sp, lineHeight = 30.sp)
-
-                    if (phase == UpdatePhase.AVAILABLE && highlights.isNotEmpty()) {
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        Text(highlights, color = Color.White, fontSize = 20.sp, lineHeight = 30.sp)
-                    }
-                    if (phase == UpdatePhase.DOWNLOADING) {
-                        val total = state.totalBytes.takeIf { it > 0L } ?: state.release?.sizeBytes ?: 0L
-                        val received = state.downloadedBytes.coerceAtLeast(0)
-                        if (total > 0L) {
-                            val progress = (received.toDouble() / total).coerceIn(0.0, 1.0).toFloat()
-                            Text("${(progress * 100).toInt()}%", color = Color.White,
-                                fontSize = 32.sp, fontWeight = FontWeight.SemiBold)
-                            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().height(8.dp))
-                            Text("${formatUpdateSize(received)} / ${formatUpdateSize(total)}", color = Color.White,
-                                fontSize = 20.sp)
-                        } else {
-                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(8.dp))
-                            Text("已下载 ${formatUpdateSize(received)}", color = Color.White, fontSize = 20.sp)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        ) {
+                            Image(painterResource(R.drawable.yunyu_mark), null, Modifier.size(64.dp))
+                            Text(title, color = Color.White, fontSize = 28.sp, lineHeight = 36.sp,
+                                fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                         }
-                    } else if (phase == UpdatePhase.CHECKING || phase == UpdatePhase.VERIFYING) {
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(8.dp))
-                    } else if (phase == UpdatePhase.AVAILABLE && (state.release?.sizeBytes ?: 0) > 0) {
-                        Text("下载大小  ${formatUpdateSize(state.release!!.sizeBytes)}", color = Color.White, fontSize = 20.sp)
-                    }
+                        Text(
+                            if (state.release == null) "当前版本  ${state.installedVersion}"
+                            else "当前版本  ${state.installedVersion}\n新版本  ${state.release.versionName}",
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            fontSize = 20.sp, lineHeight = 30.sp,
+                        )
+                        Text(explanation, color = if (phase == UpdatePhase.ERROR) MaterialTheme.colorScheme.error else Color.White,
+                            fontSize = 20.sp, lineHeight = 30.sp)
 
-                    if (phase == UpdatePhase.AVAILABLE || phase == UpdatePhase.READY || phase == UpdatePhase.INSTALL_PERMISSION) {
-                        Text("安装时会暂时退出投屏。完成后重新打开“云屿投屏”即可。",
-                            color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 20.sp, lineHeight = 30.sp)
+                        if (phase == UpdatePhase.AVAILABLE && highlights.isNotEmpty()) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            Text(highlights, color = Color.White, fontSize = 20.sp, lineHeight = 30.sp)
+                        }
+                        if (phase == UpdatePhase.DOWNLOADING) {
+                            val total = state.totalBytes.takeIf { it > 0L } ?: state.release?.sizeBytes ?: 0L
+                            val received = state.downloadedBytes.coerceAtLeast(0)
+                            if (total > 0L) {
+                                val progress = (received.toDouble() / total).coerceIn(0.0, 1.0).toFloat()
+                                Text("${(progress * 100).toInt()}%", color = Color.White,
+                                    fontSize = 32.sp, fontWeight = FontWeight.SemiBold)
+                                LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().height(8.dp))
+                                Text("${formatUpdateSize(received)} / ${formatUpdateSize(total)}", color = Color.White,
+                                    fontSize = 20.sp)
+                            } else {
+                                LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(8.dp))
+                                Text("已下载 ${formatUpdateSize(received)}", color = Color.White, fontSize = 20.sp)
+                            }
+                        } else if (phase == UpdatePhase.CHECKING || phase == UpdatePhase.VERIFYING) {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(8.dp))
+                        } else if (phase == UpdatePhase.AVAILABLE && (state.release?.sizeBytes ?: 0) > 0) {
+                            Text("下载大小  ${formatUpdateSize(state.release!!.sizeBytes)}", color = Color.White, fontSize = 20.sp)
+                        }
+
+                        if (phase == UpdatePhase.AVAILABLE || phase == UpdatePhase.READY || phase == UpdatePhase.INSTALL_PERMISSION) {
+                            Text("安装时会暂时退出投屏。完成后重新打开“云屿投屏”即可。",
+                                color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 20.sp, lineHeight = 30.sp)
+                        }
                     }
 
                     FlowRow(

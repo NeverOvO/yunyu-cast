@@ -1,6 +1,8 @@
 package io.github.jqssun.airplay.ui
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -12,6 +14,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -20,6 +29,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import io.github.jqssun.airplay.R
 import io.github.jqssun.airplay.onboarding.AutoLaunchStep
+import kotlinx.coroutines.launch
 
 /** A single optional decision, followed by a persistent, readable path if it is declined. */
 @OptIn(ExperimentalLayoutApi::class)
@@ -32,6 +42,16 @@ fun AutoLaunchPermissionDialog(
 ) {
     if (step == AutoLaunchStep.NONE) return
     val firstFocus = remember { FocusRequester() }
+    val detailsScroll = rememberScrollState()
+    val scrollScope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val windowHeight = LocalWindowInfo.current.containerSize.height
+    val safeInsets = WindowInsets.safeDrawing
+    val availableHeight = with(density) {
+        (windowHeight - safeInsets.getTop(this) - safeInsets.getBottom(this))
+            .coerceAtLeast(0).toDp()
+    }
+    val scrollStep = with(density) { 80.dp.toPx() }
     val intro = step == AutoLaunchStep.INTRO
     val title = when (step) {
         AutoLaunchStep.INTRO -> "让投屏画面自动打开"
@@ -39,13 +59,17 @@ fun AutoLaunchPermissionDialog(
         AutoLaunchStep.UNAVAILABLE -> "请从电视设置中开启"
         else -> "以后也可以开启"
     }
-    LaunchedEffect(step) { firstFocus.requestFocusUntilLanded() }
+    LaunchedEffect(step) {
+        detailsScroll.scrollTo(0)
+        firstFocus.requestFocusUntilLanded()
+    }
     Dialog(
         onDismissRequest = { if (intro) onDefer() else onClose() },
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         BoxWithConstraints(
-            Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp),
+            Modifier.fillMaxWidth().heightIn(max = availableHeight)
+                .padding(horizontal = 24.dp, vertical = 20.dp),
             contentAlignment = Alignment.Center,
         ) {
             Surface(
@@ -55,31 +79,50 @@ fun AutoLaunchPermissionDialog(
                 contentColor = Color.White,
             ) {
                 Column(
-                    Modifier.verticalScroll(rememberScrollState()).padding(28.dp),
+                    Modifier.padding(28.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        Image(painterResource(R.drawable.yunyu_mark), null, Modifier.size(64.dp))
-                        Text(title, color = Color.White, fontSize = 28.sp, lineHeight = 36.sp,
-                            fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                    }
-                    val explanation = when (step) {
-                        AutoLaunchStep.INTRO -> "退出云屿投屏、回到电视桌面后，手机下次投屏时也能自动打开画面。"
-                        AutoLaunchStep.ENABLED -> "自动打开画面的权限已开启，可以返回首页开始投屏。电视需要保持开机并联网。"
-                        AutoLaunchStep.UNAVAILABLE -> "这台电视没有打开授权页面。可以在电视系统的应用设置中，允许“云屿投屏”显示在其他应用上层。"
-                        else -> "暂不开启也能投屏。使用前，先在电视上打开“云屿投屏”即可。"
-                    }
-                    Text(explanation, color = Color.White, fontSize = 21.sp, lineHeight = 32.sp)
-                    if (intro) {
-                        Text("如出现应用列表，先选“云屿投屏”。允许“显示在其他应用上层”后按返回。",
-                            color = Color.White, fontSize = 20.sp, lineHeight = 30.sp)
-                        Text("暂不开启时，先在电视上打开本应用，也能正常投屏。",
-                            color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 19.sp, lineHeight = 28.sp)
-                    } else if (step != AutoLaunchStep.ENABLED) {
-                        Text("以后可从这里开启：", color = Color.White, fontSize = 20.sp)
-                        Text("云屿投屏 → 画面设置\n投屏时自动打开画面 → 去开启",
-                            color = MaterialTheme.colorScheme.primary, fontSize = 22.sp, lineHeight = 34.sp,
-                            fontWeight = FontWeight.Medium)
+                    Column(
+                        Modifier.weight(1f, fill = false)
+                            .dpadFocus(RoundedCornerShape(12.dp))
+                            .onPreviewKeyEvent { event ->
+                                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                                val delta = when {
+                                    event.key == Key.DirectionUp && detailsScroll.canScrollBackward -> -scrollStep
+                                    event.key == Key.DirectionDown && detailsScroll.canScrollForward -> scrollStep
+                                    else -> return@onPreviewKeyEvent false
+                                }
+                                scrollScope.launch { detailsScroll.scrollBy(delta) }
+                                true
+                            }
+                            .focusable(enabled = detailsScroll.maxValue > 0)
+                            .verticalScroll(detailsScroll)
+                            .padding(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(18.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                            Image(painterResource(R.drawable.yunyu_mark), null, Modifier.size(64.dp))
+                            Text(title, color = Color.White, fontSize = 28.sp, lineHeight = 36.sp,
+                                fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        }
+                        val explanation = when (step) {
+                            AutoLaunchStep.INTRO -> "退出云屿投屏、回到电视桌面后，手机下次投屏时也能自动打开画面。"
+                            AutoLaunchStep.ENABLED -> "自动打开画面的权限已开启，可以返回首页开始投屏。电视需要保持开机并联网。"
+                            AutoLaunchStep.UNAVAILABLE -> "这台电视没有打开授权页面。可以在电视系统的应用设置中，允许“云屿投屏”显示在其他应用上层。"
+                            else -> "暂不开启也能投屏。使用前，先在电视上打开“云屿投屏”即可。"
+                        }
+                        Text(explanation, color = Color.White, fontSize = 21.sp, lineHeight = 32.sp)
+                        if (intro) {
+                            Text("如出现应用列表，先选“云屿投屏”。允许“显示在其他应用上层”后按返回。",
+                                color = Color.White, fontSize = 20.sp, lineHeight = 30.sp)
+                            Text("暂不开启时，先在电视上打开本应用，也能正常投屏。",
+                                color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 19.sp, lineHeight = 28.sp)
+                        } else if (step != AutoLaunchStep.ENABLED) {
+                            Text("以后可从这里开启：", color = Color.White, fontSize = 20.sp)
+                            Text("云屿投屏 → 画面设置\n投屏时自动打开画面 → 去开启",
+                                color = MaterialTheme.colorScheme.primary, fontSize = 22.sp, lineHeight = 34.sp,
+                                fontWeight = FontWeight.Medium)
+                        }
                     }
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Button(

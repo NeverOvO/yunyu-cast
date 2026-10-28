@@ -29,13 +29,16 @@ suspend fun PointerInputScope.detectHorizontalDragGestures(
             overSlop = over
         }
         if (drag != null && currentEvent.changes.count { it.pressed } == 1) {
-            onDragStart(drag.position)
-            onHorizontalDrag(drag, overSlop)
-            horizontalDrag(drag.id) {
-                onHorizontalDrag(it, it.positionChange().x)
-                it.consume()
+            try {
+                onDragStart(drag.position)
+                onHorizontalDrag(drag, overSlop)
+                horizontalDrag(drag.id) {
+                    onHorizontalDrag(it, it.positionChange().x)
+                    it.consume()
+                }
+            } finally {
+                onDragEnd()
             }
-            onDragEnd()
         }
     }
 }
@@ -53,13 +56,16 @@ suspend fun PointerInputScope.detectVerticalDragGestures(
             overSlop = over
         }
         if (drag != null && currentEvent.changes.count { it.pressed } == 1) {
-            onDragStart(drag.position)
-            onVerticalDrag(drag, overSlop)
-            verticalDrag(drag.id) {
-                onVerticalDrag(it, it.positionChange().y)
-                it.consume()
+            try {
+                onDragStart(drag.position)
+                onVerticalDrag(drag, overSlop)
+                verticalDrag(drag.id) {
+                    onVerticalDrag(it, it.positionChange().y)
+                    it.consume()
+                }
+            } finally {
+                onDragEnd()
             }
-            onDragEnd()
         }
     }
 }
@@ -76,27 +82,30 @@ suspend fun PointerInputScope.detectZoomGestures(
         var started = false
         val touchSlop = viewConfiguration.touchSlop
         awaitFirstDown(requireUnconsumed = false)
-        do {
-            val event = awaitPointerEvent()
-            val canceled = event.changes.any { it.isConsumed } ||
-                event.changes.count { it.pressed } != 2
-            if (!canceled) {
-                started = true
-                val zoomChange = event.calculateZoom()
-                if (!pastTouchSlop) {
-                    zoom *= zoomChange
-                    pan += event.calculatePan()
-                    val centroidSize = event.calculateCentroidSize(useCurrent = false)
-                    if (abs(1 - zoom) * centroidSize > touchSlop || pan.getDistance() > touchSlop) {
-                        pastTouchSlop = true
+        try {
+            do {
+                val event = awaitPointerEvent()
+                val canceled = event.changes.any { it.isConsumed } ||
+                    event.changes.count { it.pressed } != 2
+                if (!canceled) {
+                    started = true
+                    val zoomChange = event.calculateZoom()
+                    if (!pastTouchSlop) {
+                        zoom *= zoomChange
+                        pan += event.calculatePan()
+                        val centroidSize = event.calculateCentroidSize(useCurrent = false)
+                        if (abs(1 - zoom) * centroidSize > touchSlop || pan.getDistance() > touchSlop) {
+                            pastTouchSlop = true
+                        }
+                    }
+                    if (pastTouchSlop) {
+                        if (zoomChange != 1f) onZoom(zoomChange)
+                        event.changes.forEach { if (it.positionChanged()) it.consume() }
                     }
                 }
-                if (pastTouchSlop) {
-                    if (zoomChange != 1f) onZoom(zoomChange)
-                    event.changes.forEach { if (it.positionChanged()) it.consume() }
-                }
-            }
-        } while (!canceled && event.changes.any { it.pressed })
-        if (started) onZoomEnd()
+            } while (!canceled && event.changes.any { it.pressed })
+        } finally {
+            if (started) onZoomEnd()
+        }
     }
 }

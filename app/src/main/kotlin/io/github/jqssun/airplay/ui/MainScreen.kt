@@ -29,7 +29,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -39,7 +43,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import android.content.Context
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -99,10 +107,10 @@ fun MainScreen(
     updateLabel: String = "检查更新",
     onOpenUpdates: () -> Unit = {}
 ) {
-    BackHandler(enabled = !isInPip) { onExit() }
     var tab by remember { mutableStateOf(Tab.OVERVIEW) }
     var fullscreen by remember { mutableStateOf(false) }
     val pin by viewModel.pinCode.collectAsState()
+    BackHandler(enabled = !isInPip && pin == null) { onExit() }
     val connections by viewModel.connectionCount.collectAsState()
     val audioOnly by viewModel.audioOnly.collectAsState()
     val videoPlaybackActive by viewModel.videoPlaybackActive.collectAsState()
@@ -524,7 +532,7 @@ fun MainScreen(
         FullscreenVideo(
             viewModel = viewModel,
             video = video,
-            onExitFullscreen = onExit,
+            onExitFullscreen = { fullscreen = false },
             onPip = onPip
         )
     } else {
@@ -561,25 +569,33 @@ fun MainScreen(
         }
     }
 
-    // pin dialog
-    if (pin != null) {
-        AlertDialog(
-            onDismissRequest = { viewModel.dismissPin() },
-            title = { Text(stringResource(R.string.dialog_pin_title)) },
-            text = {
-                Text(
-                    text = pin!!,
-                    style = MaterialTheme.typography.displayMedium,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { viewModel.dismissPin() }) { Text(stringResource(R.string.btn_ok)) }
-            }
-        )
-    }
+}
 
+/** Hosted above every playback branch so pairing cannot be hidden by an early return. */
+@Composable
+fun PairingPinDialog(pin: String?, onDismiss: () -> Unit) {
+    if (pin == null) return
+    val closeFocus = remember { FocusRequester() }
+    LaunchedEffect(pin) { closeFocus.requestFocusUntilLanded() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.dialog_pin_title)) },
+        text = {
+            Text(
+                text = pin,
+                style = MaterialTheme.typography.displayMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onDismiss,
+                shape = ButtonDefaults.shape,
+                modifier = Modifier.focusRequester(closeFocus).dpadFocus(ButtonDefaults.shape),
+            ) { Text(stringResource(R.string.btn_ok)) }
+        }
+    )
 }
 
 @Composable
@@ -848,16 +864,49 @@ private fun FullscreenVideo(
 
     var controlsVisible by remember { mutableStateOf(true) }
     var tapTick by remember { mutableStateOf(0) }
+    val rootFocus = remember { FocusRequester() }
+    val exitFocus = remember { FocusRequester() }
+    val revealKeys = remember { mutableSetOf<Key>() }
+    val windowFocused = LocalWindowInfo.current.isWindowFocused
     LaunchedEffect(tapTick) {
         controlsVisible = true
         delay(8000)
         controlsVisible = false
+    }
+    LaunchedEffect(controlsVisible, windowFocused) {
+        if (!windowFocused) {
+            revealKeys.clear()
+        } else if (controlsVisible) {
+            exitFocus.requestFocusUntilLanded()
+        } else {
+            rootFocus.requestFocusUntilLanded()
+        }
     }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .focusRequester(rootFocus)
+            .onPreviewKeyEvent { event ->
+                // Consume the complete wake-up press, including repeats and key-up,
+                // so moving focus to a button cannot accidentally activate it.
+                if (event.key in revealKeys) {
+                    if (event.type == KeyEventType.KeyUp) revealKeys.remove(event.key)
+                    true
+                } else if (event.type == KeyEventType.KeyDown && event.key in setOf(
+                        Key.DirectionUp, Key.DirectionDown, Key.DirectionLeft, Key.DirectionRight,
+                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter,
+                    )) {
+                    tapTick++
+                    if (!controlsVisible) {
+                        revealKeys.add(event.key)
+                        controlsVisible = true
+                        true
+                    } else false
+                } else false
+            }
+            .focusable()
             .pointerInput(Unit) { detectTapGestures { tapTick++ } },
         contentAlignment = Alignment.Center
     ) {
@@ -873,7 +922,8 @@ private fun FullscreenVideo(
                         tint = Color.White.copy(alpha = 0.7f)
                     )
                 }
-                IconButton(onClick = onExitFullscreen, modifier = Modifier.dpadFocus(CircleShape)) {
+                IconButton(onClick = onExitFullscreen,
+                    modifier = Modifier.focusRequester(exitFocus).dpadFocus(CircleShape)) {
                     Icon(
                         Icons.Default.FullscreenExit, contentDescription = stringResource(R.string.cd_exit_fullscreen),
                         tint = Color.White.copy(alpha = 0.7f)
@@ -914,17 +964,57 @@ private fun HoldScanButton(
     onEnd: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val currentBegin = rememberUpdatedState(onBegin)
+    val currentEnd = rememberUpdatedState(onEnd)
+    var scanning by remember { mutableStateOf(false) }
+    val beginScan = {
+        if (!scanning) {
+            scanning = true
+            currentBegin.value()
+        }
+    }
+    val endScan = {
+        if (scanning) {
+            scanning = false
+            currentEnd.value()
+        }
+    }
+    val windowFocused = LocalWindowInfo.current.isWindowFocused
+    LaunchedEffect(windowFocused) {
+        if (!windowFocused) endScan()
+    }
+    DisposableEffect(Unit) { onDispose { endScan() } }
     Box(
         modifier = modifier
             .size(48.dp)
             .clip(CircleShape)
+            .dpadFocus(CircleShape)
+            .onFocusChanged { if (!it.isFocused) endScan() }
+            .onPreviewKeyEvent { event ->
+                if (event.key !in setOf(Key.DirectionCenter, Key.Enter, Key.NumPadEnter, Key.Spacebar)) {
+                    false
+                } else when (event.type) {
+                    KeyEventType.KeyDown -> { beginScan(); true }
+                    KeyEventType.KeyUp -> { endScan(); true }
+                    else -> false
+                }
+            }
+            .focusable()
+            .semantics(mergeDescendants = true) {
+                role = Role.Button
+                onClick {
+                    beginScan()
+                    endScan()
+                    true
+                }
+            }
             .pointerInput(Unit) {
                 detectTapGestures(onPress = {
-                    onBegin()
                     try {
+                        beginScan()
                         awaitRelease()
                     } finally {
-                        onEnd()
+                        endScan()
                     }
                 })
             },

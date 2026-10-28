@@ -14,12 +14,14 @@
 | OpenSSL-CMake | [4edd36a8dab5f85a8f92650b5bdf6e0cab13aab8](https://github.com/viaduck/openssl-cmake/tree/4edd36a8dab5f85a8f92650b5bdf6e0cab13aab8) | [MIT](LICENSES/openssl-cmake-MIT.txt) |
 | OpenSSL | 3.4.4；构建脚本下载 [固定版本原始源码包](https://mirror.viaduck.org/openssl/openssl-3.4.4.tar.gz) | [Apache 2.0](LICENSES/OpenSSL-3.4.4-Apache-2.0.txt)、[作者](LICENSES/OpenSSL-3.4.4-AUTHORS.md) |
 
-FFmpeg 当前构建仅启用静态 avcodec / avutil 与 ALAC、AAC 解码器，未启用 `--enable-gpl` 或 `--enable-nonfree`。原生构建入口为 `app/src/main/cpp/CMakeLists.txt` 与 `cmake/BuildFFmpeg.cmake`。UxPlay 修改通过 `patches/UxPlay/` 中的 0001 至 0013 补丁保存；0013 调整直播播放列表等待与序列处理。
+FFmpeg 当前构建仅启用静态 avcodec / avutil 与 ALAC、AAC 解码器，未启用 `--enable-gpl` 或 `--enable-nonfree`。原生构建入口为 `app/src/main/cpp/CMakeLists.txt` 与 `cmake/BuildFFmpeg.cmake`。当前源码的 UxPlay 修改通过 `app/src/main/cpp/patches/UxPlay/` 中的 0001 至 0015 补丁保存；0013 调整直播播放列表等待与序列处理，0014 检查 SETUP 加密字段长度，0015 调整 HTTP 首包收发、分片解析和资源边界。
+
+0.6.1 为 OpenSSL 3.4.4 下载包固定官方 SHA-256，配置位于原生构建入口；Gradle 9.8.1 分发包摘要位于 `gradle/wrapper/gradle-wrapper.properties`。本轮没有升级上述第三方组件版本，也没有改变其许可。
 
 AndroidX / Jetpack Compose / Media3、Oboe、Dagger Hilt 等依赖通过 Gradle 获取；固定版本和坐标见 [gradle/libs.versions.toml](gradle/libs.versions.toml)，依赖源码与声明随各自公开组件提供。Kotlin 与 kotlinx.coroutines 同样保留其原有许可。本清单不改变任何第三方许可。
 
 ## 对应源码
 
-Release 的 `yunyu-cast-0.6.0-preview.1-source.tar.gz` 包含项目源码、四个固定提交的子模块源码、原生补丁、构建脚本，以及实际构建使用的 OpenSSL 3.4.4 原始源码包。GitHub 自动提供的 Source code ZIP / TAR 不含子模块内容。
+已发布 Release 的 `yunyu-cast-0.6.0-preview.1-source.tar.gz` 包含该版本项目源码、四个固定提交的子模块源码、0001 至 0013 原生补丁、构建脚本，以及该版构建使用的 OpenSSL 3.4.4 原始源码包。当前 0.6.1-preview.1 仅提供仓库源码，尚无 APK 或完整源码归档。GitHub 自动提供的 Source code ZIP / TAR 不含子模块内容。
 
-完整源码包构建入口见 [docs/SOURCE_BUILD.md](docs/SOURCE_BUILD.md)。源码与 APK 同时提供，签名私钥和本机配置不随发布分发。
+当前源码与历史完整源码包的构建入口见 [docs/SOURCE_BUILD.md](docs/SOURCE_BUILD.md)。已发布 APK 对应的完整源码随其 Release 提供，签名私钥和本机配置不随发布分发。

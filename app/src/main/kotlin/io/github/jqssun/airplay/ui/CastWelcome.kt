@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -47,6 +48,10 @@ fun CastWelcome(
     onOpenUpdates: () -> Unit = {}
 ) {
     var showHelp by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val installedVersion = remember(context) {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty()
+    }
     val quality = when (resolution) {
         "1920x1080" -> "1080p"
         "2560x1440" -> "2K"
@@ -61,7 +66,7 @@ fun CastWelcome(
         // A short viewport or larger system text must scroll instead of squeezing the
         // weighted header to zero height and drawing it outside the TV safe area.
         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-        val fixedHeight = wide && maxWidth >= 760.dp * fontScale && maxHeight >= 480.dp * fontScale
+        val fixedHeight = wide && maxWidth >= 760.dp * fontScale && maxHeight >= 520.dp * fontScale
         val compact = maxHeight < 480.dp || maxWidth < 800.dp
         val edgeX = if (wide) if (compact) 36.dp else 48.dp else 24.dp
         val edgeY = if (compact) 24.dp else 32.dp
@@ -119,7 +124,7 @@ fun CastWelcome(
                 identity()
                 instructions()
             }
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(shape = ButtonDefaults.shape, onClick = onOpenSettings,
                         modifier = Modifier.heightIn(min = 56.dp)
@@ -153,6 +158,11 @@ fun CastWelcome(
                 Text("不用开关接收。手机可停止投屏，遥控器返回可退出。",
                     fontSize = if (compact) 16.sp else 18.sp, lineHeight = 25.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (installedVersion.isNotBlank()) {
+                    Text("版本 $installedVersion", modifier = Modifier.align(Alignment.End),
+                        fontSize = if (compact) 16.sp else 18.sp, lineHeight = 25.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
     }

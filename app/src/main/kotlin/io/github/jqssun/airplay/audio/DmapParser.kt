@@ -6,6 +6,9 @@ import java.nio.ByteOrder
 /** Parses DMAP (iTunes metadata) binary TLV format into a tag->value map. */
 object DmapParser {
 
+    private const val MAX_METADATA_BYTES = 1024 * 1024
+    private const val MAX_CONTAINER_DEPTH = 32
+
     // tags whose payload is an integer (1/2/4/8 bytes)
     private val INT_TAGS = setOf(
         "astm", // duration ms
@@ -25,28 +28,39 @@ object DmapParser {
     private val CONTAINER_TAGS = setOf("mlit", "mcon", "mlcl")
 
     fun parse(data: ByteArray): Map<String, Any> {
+        if (data.size > MAX_METADATA_BYTES) return emptyMap()
+        return parse(ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN), depth = 0)
+    }
+
+    private fun parse(buf: ByteBuffer, depth: Int): Map<String, Any> {
         val result = mutableMapOf<String, Any>()
-        val buf = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN)
-        while (buf.remaining() >= 8) {
+        items@ while (buf.remaining() >= 8) {
             val tagBytes = ByteArray(4)
             buf.get(tagBytes)
             val tag = String(tagBytes, Charsets.US_ASCII)
             val len = buf.int
             if (len < 0 || len > buf.remaining()) break
-            val payload = ByteArray(len)
-            buf.get(payload)
+            // Share the bounded payload instead of copying it at every nesting level.
+            val payload = buf.slice().order(ByteOrder.BIG_ENDIAN).apply { limit(len) }
+            buf.position(buf.position() + len)
             result[tag] = when {
-                tag in CONTAINER_TAGS -> parse(payload)
-                tag in INT_TAGS -> _readInt(payload)
-                else -> String(payload, Charsets.UTF_8)
+                tag in CONTAINER_TAGS -> {
+                    if (depth >= MAX_CONTAINER_DEPTH) continue@items
+                    parse(payload, depth + 1)
+                }
+                tag in INT_TAGS -> {
+                    if (len != 1 && len != 2 && len != 4 && len != 8) continue@items
+                    _readInt(payload)
+                }
+                else -> Charsets.UTF_8.decode(payload).toString()
             }
         }
         return result
     }
 
-    private fun _readInt(b: ByteArray): Long {
+    private fun _readInt(b: ByteBuffer): Long {
         var v = 0L
-        for (byte in b) v = (v shl 8) or (byte.toLong() and 0xFF)
+        while (b.hasRemaining()) v = (v shl 8) or (b.get().toLong() and 0xFF)
         return v
     }
 }
