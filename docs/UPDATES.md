@@ -2,13 +2,13 @@
 
 云屿投屏从 0.5.0-preview.1 开始提供应用内检查更新。更新来源固定为公开仓库 [NeverOvO/yunyu-cast](https://github.com/NeverOvO/yunyu-cast/releases)，不需要 GitHub 账号、token 或 `update.json`。
 
-当前版本为 0.6.2-preview.1，versionCode 13。0.5.0 至 0.6.1 可通过“检查更新”获取本版，下载入口与附件见 [v0.6.2-preview.1](https://github.com/NeverOvO/yunyu-cast/releases/tag/v0.6.2-preview.1)。更新查询同时接收预览版和正式版。
+当前版本为 0.6.3-preview.1，versionCode 14。0.5.0 至 0.6.2 可通过“检查更新”获取本版，下载入口与附件见 [v0.6.3-preview.1](https://github.com/NeverOvO/yunyu-cast/releases/tag/v0.6.3-preview.1)。更新查询同时接收预览版和正式版。
 
 ## 用户操作
 
 ### 第一次升级到支持更新的版本
 
-0.4.1 及以前没有应用内更新入口。先从 [0.6.2 发布页](https://github.com/NeverOvO/yunyu-cast/releases/tag/v0.6.2-preview.1) 下载 APK，通过 U 盘或 ADB 覆盖安装一次。之后可在首页或“画面设置”使用“检查更新”。
+0.4.1 及以前没有应用内更新入口。先从 [0.6.3 发布页](https://github.com/NeverOvO/yunyu-cast/releases/tag/v0.6.3-preview.1) 下载 APK，通过 U 盘或 ADB 覆盖安装一次。之后可在首页或“画面设置”使用“检查更新”。
 
 ### 检查、下载和安装
 
@@ -36,7 +36,7 @@ GitHub 连接失败、限流、超时或新版附件尚未准备好时，应用�
 
 0.6.1 将安装包准备阶段的互斥锁提升为进程内共享锁，串行处理同一临时文件的清理、复制和检查。更新弹窗按宿主窗口安全高度限高，正文独立滚动，下载和关闭按钮位于底部。
 
-0.6.2 的打包状态见[发布记录](releases/0.6.2-preview.1.md)。本轮未执行测试、Lint、额外签名验证、截图、模拟器或真机验证，也没有本版覆盖升级的实测结果。0.6.0 的历史构建、签名验证和模拟器结果见[对应审计记录](audit-20261027.md)，不计为本版结果。
+0.6.3 的打包状态见[发布记录](releases/0.6.3-preview.1.md)。本轮未执行测试、Lint、额外签名验证、截图、模拟器或真机验证，也没有本版覆盖升级的实测结果。0.6.0 的历史构建、签名验证和模拟器结果见[对应审计记录](audit-20261027.md)，不计为本版结果。
 
 ## 维护者发布契约
 
@@ -47,10 +47,10 @@ GitHub 连接失败、限流、超时或新版附件尚未准备好时，应用�
 | 项目 | 规则 | 本版对应值 |
 | --- | --- | --- |
 | 仓库 | 固定使用 `NeverOvO/yunyu-cast` 的公开 Releases | `NeverOvO/yunyu-cast` |
-| versionName | 使用语义版本，必须高于已安装版本 | `0.6.2-preview.1` |
-| versionCode | 每次发布递增，安装包内数值必须高于已安装版本 | `13` |
-| Release tag | `v<versionName>`，与 APK 内版本一致 | `v0.6.2-preview.1` |
-| APK 文件名 | `yunyu-cast-<versionName>.apk`，使用英文前缀 | `yunyu-cast-0.6.2-preview.1.apk` |
+| versionName | 使用语义版本，必须高于已安装版本 | `0.6.3-preview.1` |
+| versionCode | 每次发布递增，安装包内数值必须高于已安装版本 | `14` |
+| Release tag | `v<versionName>`，与 APK 内版本一致 | `v0.6.3-preview.1` |
+| APK 文件名 | `yunyu-cast-<versionName>.apk`，使用英文前缀 | `yunyu-cast-0.6.3-preview.1.apk` |
 | 包名 | 保持 `com.yunyulai.tvcast` | `com.yunyulai.tvcast` |
 | 签名 | 沿用当前 Release 证书，保持签名集合一致 | 不替换为调试证书 |
 | 系统兼容 | 保持既有设备可用的 minSdk；当前为 API 26 | Android 8.0 及以上 |

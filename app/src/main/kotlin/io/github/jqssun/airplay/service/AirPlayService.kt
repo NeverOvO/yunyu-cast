@@ -150,6 +150,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     @Volatile private var dlnaOwnsPlayer = false
     private var dlnaStartPositionMs = 0L
     private var dlnaMuted = false
+    private val dlnaStartupSeekGuard = io.github.jqssun.airplay.dlna.DlnaStartupSeekGuard()
 
     val videoRenderer = VideoRenderer(this)
     val audioRenderer = AudioRenderer()
@@ -662,6 +663,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     private fun _resetDlnaSession() {
+        dlnaStartupSeekGuard.cancel()
         dlnaUri = ""
         dlnaMetadata = ""
         dlnaState = "NO_MEDIA_PRESENT"
@@ -693,6 +695,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             dlnaUri = uri
             dlnaMetadata = metadata
             dlnaStartPositionMs = 0
+            dlnaStartupSeekGuard.newMedia(uri.isNotEmpty())
             dlnaState = if (uri.isEmpty()) "NO_MEDIA_PRESENT" else "STOPPED"
             dlnaTransportStatus = "OK"
             _playbackError.value = ""
@@ -711,6 +714,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
                 dlnaOwnsPlayer = true
                 dlnaState = "TRANSITIONING"
                 airPlayVideoPlayer.setClientGain(if (dlnaMuted) 0f else 1f)
+                dlnaStartupSeekGuard.playbackStarted(dlnaStartPositionMs, SystemClock.elapsedRealtime())
                 _beginVideoPlayback(dlnaUri, dlnaStartPositionMs / 1000f, _dlnaTitle(dlnaMetadata))
                 log("DLNA Play 新建播放器，起点=${dlnaStartPositionMs}ms")
                 if (shouldLaunchOnConnect()) launchMainActivity()
@@ -724,6 +728,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         }
 
         override fun stop() = _onPlayerThread {
+            dlnaStartupSeekGuard.cancel()
             if (dlnaOwnsPlayer) _endVideoPlayback("DLNA 停止播放")
             dlnaState = if (dlnaUri.isEmpty()) "NO_MEDIA_PRESENT" else "STOPPED"
             dlnaStartPositionMs = 0
@@ -732,6 +737,15 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         override fun seek(positionMs: Long) = _onPlayerThread {
             _ensureDlnaAvailable()
             check(dlnaUri.isNotBlank()) { "尚未收到影片地址" }
+            val current = if (dlnaOwnsPlayer) airPlayVideoPlayer.snapshot() else null
+            val currentPosition = current?.let { (it.position * 1000).toLong() } ?: 0L
+            if (dlnaStartupSeekGuard.consumeInitialZero(
+                    positionMs, currentPosition, current?.playWhenReady == true,
+                    current?.buffering != false, SystemClock.elapsedRealtime(),
+                )) {
+                log("DLNA 启动重复回零已略过，继续位置=${currentPosition}ms；后续跳转正常执行")
+                return@_onPlayerThread
+            }
             val duration = _videoPlaybackInfo.value.durationMs
             dlnaStartPositionMs = positionMs.coerceIn(0, if (duration > 0) duration else Long.MAX_VALUE)
             log("DLNA Seek 目标=${dlnaStartPositionMs}ms，已有播放器=$dlnaOwnsPlayer")
@@ -901,19 +915,23 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     fun setVideoPlaying(playing: Boolean) {
+        if (!playing) dlnaStartupSeekGuard.cancel()
         if (dlnaOwnsPlayer) dlnaState = if (playing) "PLAYING" else "PAUSED_PLAYBACK"
         airPlayVideoPlayer.setPlaying(playing)
     }
 
     fun seekVideoTo(positionMs: Long, origin: String = "本机") {
+        dlnaStartupSeekGuard.cancel()
         airPlayVideoPlayer.scrub(positionMs / 1000f, origin)
     }
 
     fun setVideoScrubbing(enabled: Boolean) {
+        if (enabled) dlnaStartupSeekGuard.cancel()
         airPlayVideoPlayer.setScrubbing(enabled)
     }
 
     fun setVideoSpeed(speed: Float) {
+        dlnaStartupSeekGuard.cancel()
         airPlayVideoPlayer.setSpeed(speed)
     }
 
@@ -922,6 +940,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     fun seekVideoBy(deltaMs: Long) {
+        dlnaStartupSeekGuard.cancel()
         airPlayVideoPlayer.seekBy(deltaMs)
     }
 
@@ -966,7 +985,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             // The native HTTP worker owns connection teardown. No server or mDNS restart.
             NativeBridge.nativeDisconnectClients(nativeHandle)
         }
-        log("界面已退出，继续接收下一次投屏")
+        log("本次投屏已结束，继续接收下一次投屏")
     }
 
     fun stopVideoPlayback() = _endVideoPlayback("AirPlay Video stopped (local)")
@@ -976,6 +995,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     private fun _endVideoPlayback(message: String) {
+        dlnaStartupSeekGuard.cancel()
         if (!_videoPlaybackActive.value) return
         // lingering polls after a stop must not bounce the UI back to a pending session
         _videoPollSuppressed = true

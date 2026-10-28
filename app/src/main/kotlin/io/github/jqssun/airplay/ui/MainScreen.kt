@@ -104,13 +104,13 @@ fun MainScreen(
     onPip: () -> Unit = {},
     onLocalNetwork: () -> Unit = {},
     onExit: () -> Unit = {},
+    onEndSession: () -> Unit = {},
     updateLabel: String = "检查更新",
     onOpenUpdates: () -> Unit = {}
 ) {
     var tab by remember { mutableStateOf(Tab.OVERVIEW) }
     var fullscreen by remember { mutableStateOf(false) }
     val pin by viewModel.pinCode.collectAsState()
-    BackHandler(enabled = !isInPip && pin == null) { onExit() }
     val connections by viewModel.connectionCount.collectAsState()
     val audioOnly by viewModel.audioOnly.collectAsState()
     val videoPlaybackActive by viewModel.videoPlaybackActive.collectAsState()
@@ -118,6 +118,19 @@ fun MainScreen(
     val mirroringActive by viewModel.mirroringActive.collectAsState()
     val autoFullscreen by viewModel.pref(Prefs.AUTO_FULLSCREEN).collectAsState()
     val television = isTv()
+    val returnHomeFromPlayback: () -> Unit = {
+        fullscreen = false
+        tab = Tab.OVERVIEW
+        onEndSession()
+    }
+    BackHandler(enabled = !isInPip && pin == null) {
+        when {
+            videoPlaybackActive || videoSessionPending || fullscreen -> returnHomeFromPlayback()
+            tab != Tab.OVERVIEW -> tab = Tab.OVERVIEW
+            mirroringActive || audioOnly -> returnHomeFromPlayback()
+            else -> onExit()
+        }
+    }
 
     // don't use movableContentOf: moving AndroidView across subcomposition boundaries makes it crash on reparent
     val video: @Composable () -> Unit = {
@@ -433,7 +446,7 @@ fun MainScreen(
                         videoUrl = videoLocation,
                         downloadProgress = downloadProgress,
                         showDownload = durationMs > 0,
-                        onBackClick = onExit,
+                        onBackClick = returnHomeFromPlayback,
                         onSpeedClick = {
                             overlayVisible = false
                             showSpeedSelector = true

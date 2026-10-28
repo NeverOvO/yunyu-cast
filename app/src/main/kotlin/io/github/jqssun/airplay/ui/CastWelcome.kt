@@ -155,7 +155,7 @@ fun CastWelcome(
                         }
                     }
                 }
-                Text("不用开关接收。手机可停止投屏，遥控器返回可退出。",
+                Text("接收一直开启。投屏时按返回回到首页，首页再按返回退出。",
                     fontSize = if (compact) 16.sp else 18.sp, lineHeight = 25.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (installedVersion.isNotBlank()) {

@@ -199,6 +199,7 @@ class MainActivity : ComponentActivity() {
                     onPip = { enterPip() },
                     onLocalNetwork = ::_requestLocalNetwork,
                     onExit = ::exitToTv,
+                    onEndSession = { service?.endCurrentSession() },
                     updateLabel = updateState.entryLabel,
                     onOpenUpdates = updateViewModel::open
                 )
