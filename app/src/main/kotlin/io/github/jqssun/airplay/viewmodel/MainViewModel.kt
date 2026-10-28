@@ -32,9 +32,6 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.io.IOException
 import kotlin.math.abs
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import javax.inject.Inject
 
 enum class LocalNetworkAccess { GRANTED, ASK, SETTINGS }
@@ -84,7 +81,6 @@ data class DebugInfo(
 class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app) {
 
     private val prefs = app.getSharedPreferences(Prefs.NAME, Context.MODE_PRIVATE)
-    private val logFile = File(app.filesDir, "airplay_logs.txt")
     private var service: AirPlayService? = null
     val dacpPlayer: Player? get() = service?.dacpPlayer
 
@@ -207,16 +203,8 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
 
 
     // logs
-    private val _logs = MutableStateFlow<List<String>>(emptyList())
-    val logs: StateFlow<List<String>> = _logs.asStateFlow()
-    private val logStore = BufferedLogStore(logFile) { _logs.value = it }
-    private val _dateFmt = object : ThreadLocal<SimpleDateFormat>() {
-        override fun initialValue() = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
-    }
-
-    fun addLog(msg: String) {
-        logStore.append("${_dateFmt.get()!!.format(Date())} $msg")
-    }
+    private val logStore = AppLogStore.get(app)
+    val logs: StateFlow<List<String>> = logStore.logs
 
     fun clearLogs() = logStore.clear()
 
@@ -249,11 +237,6 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
                 Toast.makeText(ctx, "这台电视未提供日志分享功能", Toast.LENGTH_LONG).show()
             }
         }
-    }
-
-    override fun onCleared() {
-        logStore.closeAsync()
-        super.onCleared()
     }
 
     // service binding

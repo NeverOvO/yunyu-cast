@@ -62,6 +62,7 @@ import io.github.jqssun.airplay.renderer.AirPlayVideoPlayer
 import io.github.jqssun.airplay.renderer.AudioRenderer
 import io.github.jqssun.airplay.renderer.VideoRenderer
 import io.github.jqssun.airplay.viewmodel.DebugInfo
+import io.github.jqssun.airplay.viewmodel.AppLogStore
 import java.io.ByteArrayOutputStream
 import java.net.NetworkInterface
 import java.util.concurrent.Executors
@@ -255,7 +256,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     private var _clientVolSteps = 0
     private val _clientVolTimeout = Runnable { _clientVolDriveEnd() }
 
-    var logCallback: ((String) -> Unit)? = null
+    private val logStore by lazy { AppLogStore.get(this) }
 
     @Volatile private var _lastPin: String? = null
     val currentPin: String? get() = _lastPin
@@ -267,11 +268,11 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     private fun log(msg: String) {
         Log.i(TAG, msg)
-        logCallback?.invoke(msg)
+        logStore.append(msg)
     }
 
     override fun onLog(msg: String) {
-        logCallback?.invoke(msg)
+        logStore.append(msg)
     }
 
     inner class LocalBinder : Binder() {
@@ -319,7 +320,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() {
                     if (_videoPlaybackActive.value) {
-                        airPlayVideoPlayer.setPlaying(true)
+                        setVideoPlaying(true)
                         return
                     }
                     _setPlaying(true)
@@ -327,7 +328,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
                 }
                 override fun onPause() {
                     if (_videoPlaybackActive.value) {
-                        airPlayVideoPlayer.setPlaying(false)
+                        setVideoPlaying(false)
                         return
                     }
                     _setPlaying(false)
@@ -337,13 +338,13 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
                     if (_videoPlaybackActive.value) stopVideoPlayback()
                 }
                 override fun onFastForward() {
-                    if (_videoPlaybackActive.value) airPlayVideoPlayer.seekBy(VIDEO_SEEK_STEP_MS)
+                    if (_videoPlaybackActive.value) seekVideoBy(VIDEO_SEEK_STEP_MS)
                 }
                 override fun onRewind() {
-                    if (_videoPlaybackActive.value) airPlayVideoPlayer.seekBy(-VIDEO_SEEK_STEP_MS)
+                    if (_videoPlaybackActive.value) seekVideoBy(-VIDEO_SEEK_STEP_MS)
                 }
                 override fun onSeekTo(pos: Long) {
-                    if (_videoPlaybackActive.value) airPlayVideoPlayer.scrub(pos / 1000f)
+                    if (_videoPlaybackActive.value) seekVideoTo(pos, "系统媒体控制")
                 }
                 override fun onSkipToNext() {
                     if (!_videoPlaybackActive.value) dacpController?.nextItem()
@@ -518,7 +519,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         videoRenderer.keyAllowFrameDrop = prefs[Prefs.KEY_ALLOW_FRAME_DROP]
         videoRenderer.selector.maxOperatingRate = Prefs.forced(prefs[Prefs.OPERATING_RATE])
         videoRenderer.benchmarkLog = prefs[Prefs.BENCHMARK_LOG]
-        videoRenderer.benchmarkLogCallback = { msg -> logCallback?.invoke(msg) }
+        videoRenderer.benchmarkLogCallback = ::onLog
         videoRenderer.scheduledOutputBufferRelease = prefs[Prefs.SCHEDULED_OUTPUT_BUFFER_RELEASE]
         NativeBridge.nativeSetH265Enabled(nativeHandle, h265)
         NativeBridge.nativeSetCodecs(nativeHandle, alac, aac)

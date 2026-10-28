@@ -1,6 +1,6 @@
 # 完整源码包与构建
 
-当前版本为 0.6.3-preview.1，versionCode 14。APK、完整源码归档、SHA256SUMS 和第三方许可材料通过 [v0.6.3-preview.1 发布入口](https://github.com/NeverOvO/yunyu-cast/releases/tag/v0.6.3-preview.1) 提供。
+当前版本为 0.6.4-preview.1，versionCode 15。APK、完整源码归档、SHA256SUMS 和第三方许可材料通过 [v0.6.4-preview.1 发布入口](https://github.com/NeverOvO/yunyu-cast/releases/tag/v0.6.4-preview.1) 提供。
 
 ## 递归克隆当前源码
 
@@ -10,12 +10,12 @@ cd yunyu-cast
 git submodule update --init --recursive
 ```
 
-项目保留 Git 子模块及固定提交。当前 UxPlay 修改保存在父仓库 `app/src/main/cpp/patches/UxPlay/` 中的 0001 至 0015 补丁，由 Gradle 构建任务恢复基线并按顺序应用。0014 处理 SETUP 加密字段长度，0015 处理 HTTP 首包收发、分片解析和资源边界。
+项目保留 Git 子模块及固定提交。UxPlay 修改保存在父仓库 `app/src/main/cpp/patches/UxPlay/` 中，由 Gradle 构建任务恢复基线并按顺序应用。0.6.4 使用 0001 至 0016；0016 处理镜像包边界与资源释放。0.6.3 使用 0001 至 0015。0014 处理 SETUP 加密字段长度，0015 处理 HTTP 首包收发、分片解析和资源边界。0016 的范围和执行状态见[审计记录](audit-0.6.3-20261028.md)。
 
 获取本版发布标签对应源码时，在克隆目录执行：
 
 ```sh
-git checkout v0.6.3-preview.1
+git checkout v0.6.4-preview.1
 git submodule update --init --recursive
 ```
 
@@ -23,13 +23,13 @@ git submodule update --init --recursive
 
 ## 使用 Release 的完整源码包
 
-下载 `yunyu-cast-0.6.3-preview.1-source.tar.gz` 后解压，在解压目录运行：
+下载 `yunyu-cast-0.6.4-preview.1-source.tar.gz` 后解压，在解压目录运行：
 
 ```sh
 sh scripts/prepare-source-archive.sh
 ```
 
-该脚本仅为 UxPlay 建立本地 Git 索引基线，供现有补丁任务恢复源文件；不下载代码、不运行构建，也不创建提交。完整包内的 UxPlay 为固定提交的原始源码，Gradle 随后应用仓库的 0001 至 0015 补丁。旧 0.6.0 完整包仍只包含 0001 至 0013 补丁。GitHub 自动生成的 Source code ZIP / TAR 不含子模块，不能替代完整包。
+该脚本仅为 UxPlay 建立本地 Git 索引基线，供现有补丁任务恢复源文件；不下载代码、不运行构建，也不创建提交。完整包内的 UxPlay 为固定提交的原始源码，Gradle 随后应用仓库的 0001 至 0016 补丁。旧 0.6.0 完整包仍只包含 0001 至 0013 补丁。GitHub 自动生成的 Source code ZIP / TAR 不含子模块，不能替代完整包。
 
 ## 环境与命令
 
@@ -70,3 +70,11 @@ sh scripts/prepare-source-archive.sh
 ## 0.6.3 发布构建
 
 本版完成 ARM32 / ARM64 Release 构建与 R8 处理，构建退出码为 0。沿用原生依赖与 0001 至 0015 补丁；本机构建排除了三个 `lintVital` 任务并跳过 `applyUxplayPatches`，保留已有原生工作区。未新增或运行测试、Lint、截图、模拟器或真机验证。签名交付状态见 [0.6.3 发布说明](releases/0.6.3-preview.1.md)。
+
+## 0.6.4 发布构建
+
+本版完成 ARM32 / ARM64 Release 构建与 R8 处理、16 KiB 对齐及原发布证书签名。构建排除三个 `lintVital` 任务并跳过 `applyUxplayPatches`，使用已应用 0001 至 0016 补丁的本地源码，保留已有原生工作区。
+
+首次构建在读取 `app/build` 中的同步副本 class 文件时停滞。终止该次构建，清理 557 个生成目录内带数字副本后缀的文件后，以 `--offline --no-daemon` 重新构建成功，退出码为 0。这些文件是可重新生成的构建产物；业务源码及历史发布附件保持原样。
+
+本轮未运行测试、Lint、额外签名验证、模拟器或电视实测。交付附件及更新方式见 [0.6.4 发布说明](releases/0.6.4-preview.1.md)。完整源码包包含固定子模块及 0001 至 0016 持久补丁，不包含本地副本文件或签名材料。

@@ -75,14 +75,12 @@ class MainActivity : ComponentActivity() {
     }
     private var service: AirPlayService? = null
     val isInPip = mutableStateOf(false)
-    private val logCallback: (String) -> Unit = { viewModel.addLog(it) }
     private val pinCallback: (String?) -> Unit = { viewModel.showPin(it) }
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val svc = (binder as? AirPlayService.LocalBinder)?.service ?: return
             service = svc
-            svc.logCallback = logCallback
             svc.pinCallback = pinCallback
             viewModel.bindService(svc)
             viewModel.showPin(svc.currentPin)
@@ -410,7 +408,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         service?.let {
-            if (it.logCallback === logCallback) it.logCallback = null
             if (it.pinCallback === pinCallback) it.pinCallback = null
         }
         unbindService(connection)

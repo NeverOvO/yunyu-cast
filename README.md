@@ -4,11 +4,11 @@
 
 云屿投屏是安装在 Android 电视上的 AirPlay / DLNA 接收端，用于接收 iPhone 屏幕镜像，以及视频 App 通过兼容投屏协议发送的影片。界面面向客厅和长辈使用：大字引导、遥控器操作、打开后自动接收。
 
-当前版本为 **0.6.3-preview.1 家庭试用版**，versionCode 为 14。本版根据电视日志处理起播后的首次回零，增加日志翻页并调整遥控返回路径；实际电视效果仍需本版运行结果确认。
+当前发布版本为 **0.6.4-preview.1 家庭试用版**，versionCode 为 15。本版补齐 AirPlay 异常视频包检查与资源释放，统一系统媒体按键控制，并在退出界面后继续保存后台日志。沿用用户已反馈可用的 0.6.3 起播兼容、日志翻页与返回首页流程，详见[发布说明](docs/releases/0.6.4-preview.1.md)。
 
 应用支持 Android 8.0 及以上的 ARM32 / ARM64 设备，围绕国行索尼 85X90 系列使用场景开发，其他电视的兼容性以实际运行结果为准。
 
-[下载 0.6.3 APK](https://github.com/NeverOvO/yunyu-cast/releases/download/v0.6.3-preview.1/yunyu-cast-0.6.3-preview.1.apk) · [发布说明与附件](https://github.com/NeverOvO/yunyu-cast/releases/tag/v0.6.3-preview.1) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/NeverOvO/yunyu-cast/issues)
+[下载 0.6.4 APK](https://github.com/NeverOvO/yunyu-cast/releases/download/v0.6.4-preview.1/yunyu-cast-0.6.4-preview.1.apk) · [发布说明与附件](https://github.com/NeverOvO/yunyu-cast/releases/tag/v0.6.4-preview.1) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/NeverOvO/yunyu-cast/issues)
 
 ## 安装和投屏
 
@@ -32,7 +32,7 @@
 
 ## 在电视上更新
 
-已安装 0.5.0 至 0.6.2 的电视可在首页或“画面设置”点“检查更新”，获取 0.6.3。0.4.1 及以前需要先通过 U 盘或 ADB 手动覆盖安装，之后即可在应用内更新。发现新版后，点“下载并安装”，电视会在后台下载并显示进度；可选择“稍后安装”或“取消下载”，退出后重新打开可恢复下载进度。
+已安装 0.5.0 至 0.6.3 的电视可在首页或“画面设置”点“检查更新”，获取 0.6.4。0.4.1 及以前需要先通过 U 盘或 ADB 手动覆盖安装，之后即可在应用内更新。发现新版后，点“下载并安装”，电视会在后台下载并显示进度；可选择“稍后安装”或“取消下载”，退出后重新打开可恢复下载进度。
 
 下载完成时，若仍在应用页面且没有投屏，会打开系统安装流程。首次更新需要允许“云屿投屏”作为安装来源，返回后继续；最终安装仍需在电视系统页面确认。投屏期间不会弹出更新窗口或自动打开安装。
 
@@ -68,7 +68,7 @@
 
 DLNA 支持可直接访问的 HTTP / HTTPS 视频地址。需要登录授权、DRM 保护、平台自有投屏协议或设备白名单的影片，可能无法播放或发现设备。本项目不支持 DRM 受保护影片，不包含 Miracast、Google Cast 或各视频平台自有接收协议，也不提供脱离局域网的点对点投屏。
 
-用户在 0.6.0 至 0.6.2 观察到 Bilibili TV／DLNA 起播约 1 秒后音画一起重播。新日志已确认：播放到 1630 ms 时收到 DLNA Seek(0)，随后实际回到 0 ms。0.6.3 对新影片启动阶段的首次回零作一次性兼容处理；暂停、其他跳转或本机操作会取消该例外，第二次回零照常执行。该指令不区分 App 初始化和手动操作，首次手动回零在同样条件下也可能被略过，实际适用范围见[0.6.3 发布说明](docs/releases/0.6.3-preview.1.md)。本版未进行电视实测。
+用户在 0.6.0 至 0.6.2 观察到 Bilibili TV／DLNA 起播约 1 秒后音画一起重播。新日志已确认：播放到 1630 ms 时收到 DLNA Seek(0)，随后实际回到 0 ms。0.6.3 对新影片启动阶段的首次回零作一次性兼容处理；暂停、其他跳转或本机操作会取消该例外，第二次回零照常执行。该指令不区分 App 初始化和手动操作，首次手动回零在同样条件下也可能被略过，实际适用范围见[0.6.3 发布说明](docs/releases/0.6.3-preview.1.md)。后续用户已反馈本版可用，开发端没有独立电视实测记录。
 
 日志页增加固定的上一页、下一页和查看最新按钮，翻页时保留当前记录，避免新日志打断阅读。按遥控返回回首页，后台接收保持开启。
 
@@ -130,7 +130,7 @@ sdk.dir=/absolute/path/to/Android/sdk
 
 应用包名为 `com.yunyulai.tvcast`。APK 同时包含 `armeabi-v7a` 和 `arm64-v8a`，不包含 x86 模拟器构建。
 
-当前源码使用 UxPlay 0001 至 0015 补丁，并固定 Gradle 9.8.1 分发包及 OpenSSL 3.4.4 原始包的 SHA-256。0.6.1 的完整源码附件 `yunyu-cast-0.6.1-preview.1-source.tar.gz` 包含项目源码、原生子模块、OpenSSL 原始包和这些补丁；旧 0.6.0 归档仍只包含 0001 至 0013 补丁。获取和构建方式见[完整源码构建说明](docs/SOURCE_BUILD.md)。GitHub 自动生成的源码 ZIP 不包含子模块。
+0.6.4 源码使用 UxPlay 0001 至 0016 补丁；0.6.1 至 0.6.3 完整源码附件包含 0001 至 0015，旧 0.6.0 归档包含 0001 至 0013。项目固定 Gradle 9.8.1 分发包及 OpenSSL 3.4.4 原始包的 SHA-256。获取和构建方式见[完整源码构建说明](docs/SOURCE_BUILD.md)。GitHub 自动生成的源码 ZIP 不包含子模块。
 
 仓库 Actions 仅提供手动触发的未签名构建，不会自动使用发布证书或上传 Release。
 
@@ -146,6 +146,7 @@ AirPlay / RAOP 底层实现来自 [UxPlay](https://github.com/FDH2/UxPlay)。项
 - [0.6.0 代码审计与检查范围](docs/audit-20261027.md)
 - [0.6.1 发布说明](docs/releases/0.6.1-preview.1.md)
 - [2026-10-28 静态审计与执行范围](docs/audit-20261028.md)
+- [0.6.3 后续静态审计与修补记录](docs/audit-0.6.3-20261028.md)
 - [参与贡献](CONTRIBUTING.md)
 - [来源与修改声明](NOTICE.md)
 - [第三方组件与许可](THIRD_PARTY_NOTICES.md)
