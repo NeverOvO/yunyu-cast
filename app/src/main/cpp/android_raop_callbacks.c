@@ -364,7 +364,7 @@ static void _video_play(void *cls, const char *location, const float start_posit
     }
     ctx->play_ready = 0;
     pthread_mutex_unlock(&ctx->playback_info_lock);
-    android_callbacks_update_playback_info(ctx, start_position, 0.0, 0.0f, 0);
+    android_callbacks_update_playback_info(ctx, start_position, 0.0, 0.0f, 0, 1);
     JNIEnv *env = _get_env(ctx);
     if (!env || !location) return;
     jstring jloc = (*env)->NewStringUTF(env, location);
@@ -403,7 +403,7 @@ static void _video_rate(void *cls, const float rate) {
 
 static void _video_stop(void *cls) {
     android_callback_ctx_t *ctx = (android_callback_ctx_t *)cls;
-    android_callbacks_update_playback_info(ctx, 0.0, -1.0, 0.0f, 0);
+    android_callbacks_update_playback_info(ctx, 0.0, -1.0, 0.0f, 0, 0);
     JNIEnv *env = _get_env(ctx);
     if (!env) return;
     (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_video_stop);
