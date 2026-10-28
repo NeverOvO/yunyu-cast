@@ -390,6 +390,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             _videoPlaybackSize.value = width to height
         }
         airPlayVideoPlayer.onTitle = { if (!it.isNullOrBlank()) _videoTitle.value = it }
+        airPlayVideoPlayer.onDiagnostic = ::log
         airPlayVideoPlayer.onError = { message ->
             _playbackError.value = "影片播放失败：$message。请重新投屏；仍失败可查看连接帮助中的日志。"
             if (dlnaOwnsPlayer) dlnaTransportStatus = "ERROR_OCCURRED"
@@ -687,6 +688,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     private val dlnaController = object : DlnaPlayerController {
         override fun setUri(uri: String, metadata: String) = _onPlayerThread {
             _ensureDlnaAvailable()
+            val sameUri = uri == dlnaUri
             if (dlnaOwnsPlayer) _endVideoPlayback("DLNA 更换影片")
             dlnaUri = uri
             dlnaMetadata = metadata
@@ -695,7 +697,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             dlnaTransportStatus = "OK"
             _playbackError.value = ""
             _videoPlaybackInfo.value = VideoPlaybackInfo(playing = false)
-            log("DLNA 已接收影片")
+            log("DLNA 已接收影片，同一地址=$sameUri")
         }
 
         override fun play() = _onPlayerThread {
@@ -704,11 +706,13 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             dlnaTransportStatus = "OK"
             if (dlnaOwnsPlayer && _videoPlaybackActive.value) {
                 setVideoPlaying(true)
+                log("DLNA Play 继续当前播放器")
             } else {
                 dlnaOwnsPlayer = true
                 dlnaState = "TRANSITIONING"
                 airPlayVideoPlayer.setClientGain(if (dlnaMuted) 0f else 1f)
                 _beginVideoPlayback(dlnaUri, dlnaStartPositionMs / 1000f, _dlnaTitle(dlnaMetadata))
+                log("DLNA Play 新建播放器，起点=${dlnaStartPositionMs}ms")
                 if (shouldLaunchOnConnect()) launchMainActivity()
             }
             log("DLNA 开始播放")
@@ -730,7 +734,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             check(dlnaUri.isNotBlank()) { "尚未收到影片地址" }
             val duration = _videoPlaybackInfo.value.durationMs
             dlnaStartPositionMs = positionMs.coerceIn(0, if (duration > 0) duration else Long.MAX_VALUE)
-            if (dlnaOwnsPlayer) seekVideoTo(dlnaStartPositionMs)
+            log("DLNA Seek 目标=${dlnaStartPositionMs}ms，已有播放器=$dlnaOwnsPlayer")
+            if (dlnaOwnsPlayer) seekVideoTo(dlnaStartPositionMs, "DLNA")
         }
 
         override fun setVolume(percent: Int) = _onPlayerThread {
@@ -748,13 +753,18 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
         override fun snapshot(): DlnaPlaybackSnapshot = _onPlayerThread {
             val info = _videoPlaybackInfo.value
+            val current = if (dlnaOwnsPlayer && _videoPlaybackActive.value) airPlayVideoPlayer.snapshot() else null
             val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
             DlnaPlaybackSnapshot(
                 uri = dlnaUri,
                 metadata = dlnaMetadata,
-                state = dlnaState,
-                positionMs = if (dlnaOwnsPlayer) info.positionMs else dlnaStartPositionMs,
-                durationMs = if (dlnaUri.isNotEmpty()) info.durationMs else 0,
+                state = if (current == null) dlnaState else when {
+                    current.buffering -> "TRANSITIONING"
+                    current.playWhenReady -> "PLAYING"
+                    else -> "PAUSED_PLAYBACK"
+                },
+                positionMs = if (dlnaOwnsPlayer) current?.let { (it.position * 1000).toLong() } ?: info.positionMs else dlnaStartPositionMs,
+                durationMs = if (dlnaUri.isNotEmpty()) current?.let { (it.duration * 1000).toLong().coerceAtLeast(0) } ?: info.durationMs else 0,
                 volume = (audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) * 100f / max).roundToInt(),
                 muted = dlnaMuted,
                 transportStatus = dlnaTransportStatus
@@ -895,8 +905,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         airPlayVideoPlayer.setPlaying(playing)
     }
 
-    fun seekVideoTo(positionMs: Long) {
-        airPlayVideoPlayer.scrub(positionMs / 1000f)
+    fun seekVideoTo(positionMs: Long, origin: String = "本机") {
+        airPlayVideoPlayer.scrub(positionMs / 1000f, origin)
     }
 
     fun setVideoScrubbing(enabled: Boolean) {

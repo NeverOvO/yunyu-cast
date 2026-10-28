@@ -1,6 +1,6 @@
 # 完整源码包与构建
 
-当前版本为 0.6.1-preview.1，versionCode 12。APK、完整源码归档、SHA256SUMS 和第三方许可材料通过 [v0.6.1-preview.1 发布入口](https://github.com/NeverOvO/yunyu-cast/releases/tag/v0.6.1-preview.1) 提供。
+当前版本为 0.6.2-preview.1，versionCode 13。APK、完整源码归档、SHA256SUMS 和第三方许可材料通过 [v0.6.2-preview.1 发布入口](https://github.com/NeverOvO/yunyu-cast/releases/tag/v0.6.2-preview.1) 提供。
 
 ## 递归克隆当前源码
 
@@ -15,7 +15,7 @@ git submodule update --init --recursive
 获取本版发布标签对应源码时，在克隆目录执行：
 
 ```sh
-git checkout v0.6.1-preview.1
+git checkout v0.6.2-preview.1
 git submodule update --init --recursive
 ```
 
@@ -23,7 +23,7 @@ git submodule update --init --recursive
 
 ## 使用 Release 的完整源码包
 
-下载 `yunyu-cast-0.6.1-preview.1-source.tar.gz` 后解压，在解压目录运行：
+下载 `yunyu-cast-0.6.2-preview.1-source.tar.gz` 后解压，在解压目录运行：
 
 ```sh
 sh scripts/prepare-source-archive.sh
@@ -60,3 +60,9 @@ sh scripts/prepare-source-archive.sh
 独立模拟器不等同于索尼电视或真实 AirPlay / DLNA 投屏环境。源码包未进行独立构建，不宣称与发布 APK 逐字节可复现。实际分发状态及附件以对应 GitHub Release 为准。
 
 仓库 Actions 只提供手动触发的未签名 APK 构建，不读取发布私钥，不自动创建 Release。预览版的下载地址使用明确版本标签，避免将预览包误当作稳定版。
+
+## 0.6.2 发布构建
+
+0.6.2 已完成 ARM32 / ARM64 Release 构建、R8 处理、16 KiB 对齐及原发布证书签名。构建排除了三个 `lintVital` 任务，并跳过会重置 UxPlay 文件的 `applyUxplayPatches`，使用本地已有的 0001 至 0015 补丁源文件。
+
+本机构建先因 OpenSSL 下载中断失败，随后使用 0.6.1 完整源码归档内的同版本依赖；还移除了 `app/build` 目录中的同步副本生成文件，再次构建完成。未运行测试、Android Lint、额外签名验证、截图、模拟器或真机验证。完整源码归档仍采用固定子模块与持久补丁，不包含本机副本文件或签名材料。

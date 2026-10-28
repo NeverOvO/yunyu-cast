@@ -306,9 +306,6 @@ class DlnaRenderer(
                     try {
                         val command = DlnaSoap.parse(body)
                         controlAction = command.action.takeIf { it in DIAGNOSTIC_ACTIONS } ?: "未知动作"
-                        if (command.action in IMPORTANT_CONTROL_ACTIONS) {
-                            diagnostic("receive:$controlAction", "DLNA 收到控制：$controlService/$controlAction")
-                        }
                         headers["soapaction"]?.trim('"')?.let {
                             if(it != "${DlnaDescriptions.services[service]}#${command.action}") throw DlnaActionException(401, "Invalid Action")
                         }
@@ -316,6 +313,11 @@ class DlnaRenderer(
                             // A request may expire while waiting behind another player's main-looper call.
                             // Do not let its stale Play/Stop run after the phone has already timed out.
                             if(!rt.active.get() || socket.isClosed) throw DlnaActionException(501, "Action Failed")
+                            // These actions change playback. Preserve every one in execution order;
+                            // the old one-second throttle hid consecutive commands during startup.
+                            if (command.action in IMPORTANT_CONTROL_ACTIONS) {
+                                log("DLNA 执行控制：$controlService/$controlAction")
+                            }
                             DlnaSoap.execute(service, command, controller)
                         }
                         response(output, 200, "OK", answer)
@@ -529,7 +531,7 @@ class DlnaRenderer(
         output.write(h.toByteArray(Charsets.UTF_8)); if(!head) output.write(data); output.flush()
     }
     companion object {
-        private val IMPORTANT_CONTROL_ACTIONS = setOf("SetAVTransportURI", "Play", "Pause", "Stop")
+        private val IMPORTANT_CONTROL_ACTIONS = setOf("SetAVTransportURI", "Play", "Pause", "Stop", "Seek")
         private val DIAGNOSTIC_ACTIONS = IMPORTANT_CONTROL_ACTIONS + setOf(
             "Seek", "GetTransportInfo", "GetPositionInfo", "GetMediaInfo", "GetDeviceCapabilities",
             "GetTransportSettings", "GetCurrentTransportActions", "SetPlayMode", "GetVolume", "SetVolume",

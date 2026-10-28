@@ -22,6 +22,6 @@ AndroidX / Jetpack Compose / Media3、Oboe、Dagger Hilt 等依赖通过 Gradle 
 
 ## 对应源码
 
-本版完整源码附件 `yunyu-cast-0.6.1-preview.1-source.tar.gz` 包含项目源码、四个固定提交的子模块源码、0001 至 0015 原生补丁、构建脚本，以及构建使用的 OpenSSL 3.4.4 原始源码包。下载入口为 [v0.6.1-preview.1](https://github.com/NeverOvO/yunyu-cast/releases/tag/v0.6.1-preview.1)。旧 0.6.0 完整源码归档仍只包含 0001 至 0013 补丁，不包含本版修改。GitHub 自动提供的 Source code ZIP / TAR 不含子模块内容。
+本版完整源码附件 `yunyu-cast-0.6.2-preview.1-source.tar.gz` 包含项目源码、四个固定提交的子模块源码、0001 至 0015 原生补丁、构建脚本，以及构建使用的 OpenSSL 3.4.4 原始源码包。下载入口为 [v0.6.2-preview.1](https://github.com/NeverOvO/yunyu-cast/releases/tag/v0.6.2-preview.1)。旧 0.6.0 完整源码归档仍只包含 0001 至 0013 补丁，不包含本版修改。GitHub 自动提供的 Source code ZIP / TAR 不含子模块内容。
 
 当前源码与完整源码包的构建入口见 [docs/SOURCE_BUILD.md](docs/SOURCE_BUILD.md)。APK 对应的完整源码随其 Release 提供，签名私钥和本机配置不随发布分发。
